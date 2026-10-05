@@ -95,6 +95,14 @@ impl BlockBehaviour for ComposterBlock {
     fn is_pathfindable(&self, _state: &BlockState, _computation_type: PathComputationType) -> bool {
         false
     }
+
+    fn adjust_drops(&self, state: &BlockState, mut drops: Vec<ItemStack>) -> Vec<ItemStack> {
+        let level = ComposterLikeProperties::from_state_id(state.id).level;
+        if level < 8 {
+            drops.retain(|stack| stack.item.id != Item::BONE_MEAL.id);
+        }
+        drops
+    }
 }
 
 impl ComposterBlock {
@@ -138,5 +146,53 @@ impl ComposterBlock {
         );
 
         world.spawn_entity(Arc::new(item_entity));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pumpkin_data::BlockState;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+
+    fn state_for_level(level: u8) -> &'static BlockState {
+        let mut props = ComposterLikeProperties::default(&Block::COMPOSTER);
+        props.level = level;
+        BlockState::from_id(props.to_state_id(&Block::COMPOSTER))
+    }
+
+    fn broken_drops(level: u8) -> Vec<ItemStack> {
+        ComposterBlock.adjust_drops(
+            state_for_level(level),
+            vec![
+                ItemStack::new(1, &Item::COMPOSTER),
+                ItemStack::new(1, &Item::BONE_MEAL),
+            ],
+        )
+    }
+
+    fn count(drops: &[ItemStack], item: &Item) -> u32 {
+        drops
+            .iter()
+            .filter(|stack| stack.item.id == item.id)
+            .map(|stack| u32::from(stack.item_count))
+            .sum()
+    }
+
+    #[test]
+    fn breaking_below_the_ready_level_drops_the_composter_only() {
+        for level in 0..8 {
+            let drops = broken_drops(level);
+            assert_eq!(count(&drops, &Item::COMPOSTER), 1);
+            assert_eq!(count(&drops, &Item::BONE_MEAL), 0);
+        }
+    }
+
+    #[test]
+    fn breaking_a_ready_composter_drops_bone_meal() {
+        let drops = broken_drops(8);
+        assert_eq!(count(&drops, &Item::COMPOSTER), 1);
+        assert_eq!(count(&drops, &Item::BONE_MEAL), 1);
     }
 }

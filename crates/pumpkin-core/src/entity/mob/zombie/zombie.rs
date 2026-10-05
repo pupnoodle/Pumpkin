@@ -1,10 +1,12 @@
-use crate::entity::Entity;
 use crate::entity::mob::equipment::RegionalDifficulty;
 use crate::entity::mob::zombie::ZombieEntityBase;
 use crate::entity::mob::{Mob, MobEntity};
+use crate::entity::{Entity, EntityBase};
 use crate::world::World;
+use pumpkin_data::entity::EntityType;
 use pumpkin_nbt::compound::NbtCompound;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 pub struct ZombieEntity {
     entity: Arc<ZombieEntityBase>,
@@ -55,6 +57,13 @@ impl Mob for ZombieEntity {
     fn mob_read_nbt(&self, nbt: &NbtCompound) {
         self.entity.mob_read_nbt(nbt);
     }
+
+    fn mob_tick(&self, _caller: &dyn EntityBase) {
+        let living = &self.entity.mob_entity.living_entity;
+        if living.is_alive() && living.entity.is_under_water() {
+            self.convert_to_drowned();
+        }
+    }
 }
 
 impl ZombieEntity {
@@ -78,5 +87,51 @@ impl ZombieEntity {
 
     pub fn set_baby(&self, baby: bool) {
         self.entity.set_baby(baby);
+    }
+
+    /// Vanilla `Zombie.tick`: replace the zombie with the drowned it
+    /// becomes when it goes underwater.
+    fn convert_to_drowned(&self) {
+        let entity = &self.entity.mob_entity.living_entity.entity;
+        let world = entity.world.load();
+        let pos = entity.pos.load();
+
+        let drowned = crate::entity::r#type::from_type(
+            &EntityType::DROWNED,
+            pos,
+            &world,
+            uuid::Uuid::new_v4(),
+        );
+        let drowned_entity = drowned.get_entity();
+        drowned_entity.set_rotation(entity.yaw.load(), entity.pitch.load());
+        drowned_entity.head_yaw.store(entity.head_yaw.load());
+        drowned_entity.velocity.store(entity.velocity.load());
+        drowned_entity.invulnerable.store(
+            entity.invulnerable.load(Ordering::Relaxed),
+            Ordering::Relaxed,
+        );
+        if let Some(custom_name) = &**entity.custom_name.load() {
+            drowned_entity.set_custom_name(custom_name.clone());
+            drowned_entity
+                .set_custom_name_visible(entity.custom_name_visible.load(Ordering::Relaxed));
+        }
+
+        if let Some(mob) = drowned.get_mob() {
+            let mob_entity = mob.get_mob_entity();
+            mob_entity.set_no_ai(self.entity.mob_entity.is_no_ai());
+            mob_entity.persistence_required.store(
+                self.entity
+                    .mob_entity
+                    .persistence_required
+                    .load(Ordering::Relaxed),
+                Ordering::Relaxed,
+            );
+            if self.entity.is_baby() {
+                mob.spawn_as_baby();
+            }
+        }
+
+        world.spawn_entity(drowned);
+        entity.remove();
     }
 }

@@ -6,11 +6,13 @@ use pumpkin_util::text::TextComponent;
 use crate::command::argument_builder::{ArgumentBuilder, argument, command};
 use crate::command::argument_types::function::FunctionArgumentType;
 use crate::command::context::command_context::CommandContext;
-use crate::command::errors::error_types::CommandErrorType;
+use crate::command::errors::command_syntax_error::CommandSyntaxError;
+use crate::command::errors::error_types::{CommandErrorType, LiteralCommandErrorType};
 use crate::command::node::dispatcher::CommandDispatcher;
 use crate::command::node::{CommandExecutor, CommandExecutorResult};
 use crate::command::suggestion::provider::{SuggestionProvider, SuggestionProviderResult};
 use crate::command::suggestion::suggestions::SuggestionsBuilder;
+use crate::data::datapack::COMMAND_CHAIN_TOO_LONG;
 
 const DESCRIPTION: &str = "Runs commands found in the corresponding function files.";
 const PERMISSION: &str = "minecraft:command.function";
@@ -19,6 +21,9 @@ static ERROR_UNKNOWN_FUNCTION: CommandErrorType<1> = CommandErrorType::new(
     translation::java::ARGUMENTS_FUNCTION_UNKNOWN,
     translation::java::ARGUMENTS_FUNCTION_UNKNOWN,
 );
+
+static ERROR_COMMAND_CHAIN_TOO_LONG: LiteralCommandErrorType =
+    LiteralCommandErrorType::new(COMMAND_CHAIN_TOO_LONG);
 
 struct FunctionSuggestionProvider;
 
@@ -44,14 +49,23 @@ impl CommandExecutor for FunctionExecutor {
         let name_str = FunctionArgumentType::get(context, "name")?;
         let server = context.server();
 
-        let Ok(executed_count) =
-            server
+        let executed_count =
+            match server
                 .datapack_manager
                 .execute_function(server, &context.source, name_str)
-        else {
-            return Err(ERROR_UNKNOWN_FUNCTION
-                .create_without_context(TextComponent::text(name_str.to_string())));
-        };
+            {
+                Ok(executed_count) => executed_count,
+                Err(err) => {
+                    if err.contains(COMMAND_CHAIN_TOO_LONG) {
+                        return Err(CommandSyntaxError::create_without_context(
+                            &ERROR_COMMAND_CHAIN_TOO_LONG,
+                            TextComponent::text(err),
+                        ));
+                    }
+                    return Err(ERROR_UNKNOWN_FUNCTION
+                        .create_without_context(TextComponent::text(name_str.to_string())));
+                }
+            };
 
         if name_str.starts_with('#') {
             context.source.send_feedback(

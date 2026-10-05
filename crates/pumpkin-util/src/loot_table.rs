@@ -22,6 +22,10 @@ pub enum LootCondition {
         chances: &'static [f32],
     },
     AllOf(&'static [Self]),
+    MatchBlockState {
+        block: &'static str,
+        properties: &'static [(&'static str, &'static str)],
+    },
 }
 
 /// Bonus count formulas when tools have fortune or looting enchantments.
@@ -107,6 +111,10 @@ pub enum DynamicLootCondition {
         raining: Option<bool>,
         thundering: Option<bool>,
     },
+    MatchBlockState {
+        block: String,
+        properties: Vec<(String, String)>,
+    },
 }
 
 impl From<LootCondition> for DynamicLootCondition {
@@ -136,6 +144,13 @@ impl From<LootCondition> for DynamicLootCondition {
             LootCondition::AllOf(conditions) => {
                 Self::AllOf(conditions.iter().copied().map(Self::from).collect())
             }
+            LootCondition::MatchBlockState { block, properties } => Self::MatchBlockState {
+                block: block.to_string(),
+                properties: properties
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.to_string()))
+                    .collect(),
+            },
         }
     }
 }

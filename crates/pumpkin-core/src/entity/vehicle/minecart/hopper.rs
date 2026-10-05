@@ -82,7 +82,7 @@ impl HopperMinecart {
             let Some(item) = entity.get_item_entity() else {
                 continue;
             };
-            let (backup, one) = {
+            let (backup, remaining) = {
                 let mut stack = item
                     .get_item_stack()
                     .lock()
@@ -90,26 +90,21 @@ impl HopperMinecart {
                 if stack.is_empty() {
                     continue;
                 }
-                (stack.clone(), stack.split(1))
-            };
-            if HopperBlockEntity::add_one_item(inventory.as_ref(), inventory.as_ref(), &one) {
-                let is_empty = {
-                    let stack = item
-                        .get_item_stack()
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    stack.is_empty()
-                };
-                if is_empty {
-                    item.get_entity().remove();
+                let backup = stack.clone();
+                let remaining =
+                    HopperBlockEntity::add_item(inventory.as_ref(), inventory.as_ref(), &stack);
+                if remaining.item_count != stack.item_count {
+                    *stack = remaining.clone();
                 }
-                return true;
+                (backup, remaining)
+            };
+            if remaining.item_count == backup.item_count {
+                continue;
             }
-            let mut stack = item
-                .get_item_stack()
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            *stack = backup;
+            if remaining.is_empty() {
+                item.get_entity().remove();
+            }
+            return true;
         }
         false
     }

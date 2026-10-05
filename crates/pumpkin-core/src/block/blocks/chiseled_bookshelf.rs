@@ -220,3 +220,70 @@ impl ChiseledBookshelfBlock {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::block::entities::chiseled_bookshelf::ChiseledBookshelfBlockEntity;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+    use pumpkin_inventory::Inventory;
+    use pumpkin_inventory::build_equipment_slots;
+    use pumpkin_inventory::entity_equipment::EntityEquipment;
+    use pumpkin_inventory::player::player_inventory::PlayerInventory;
+    use pumpkin_util::GameMode;
+    use pumpkin_util::Hand;
+    use pumpkin_util::math::position::BlockPos;
+    use std::sync::{Arc, Mutex};
+
+    fn inventory() -> PlayerInventory {
+        PlayerInventory::new(
+            Arc::new(Mutex::new(EntityEquipment::new())),
+            Arc::new(build_equipment_slots()),
+        )
+    }
+
+    #[test]
+    fn insert_then_take_keeps_a_single_book() {
+        let inventory = inventory();
+        inventory.set_held_item(ItemStack::new(1, &Item::BOOK));
+        let hand = match Hand::from_packet_id(0) {
+            Ok(hand) => hand,
+            Err(_) => panic!("packet hand 0 is the main hand"),
+        };
+        let mut hand_stack = inventory.get_stack_in_hand(hand);
+        let before = hand_stack.clone();
+        let shelf = ChiseledBookshelfBlockEntity::new(BlockPos::ZERO);
+        shelf.set_book(0, hand_stack.split_unless_creative(GameMode::Survival, 1));
+        crate::item::store_used_hand(&inventory, hand, &before, hand_stack);
+
+        assert!(inventory.held_item().is_empty());
+        assert!(inventory.off_hand_item().is_empty());
+        assert_eq!(shelf.get_stack(0).item_count, 1);
+
+        let taken = shelf.remove_book(0, 1);
+        assert!(shelf.get_stack(0).is_empty());
+        assert_eq!(taken.item_count, 1);
+        inventory.set_held_item(taken);
+        assert_eq!(inventory.held_item().item_count, 1);
+        assert!(inventory.off_hand_item().is_empty());
+    }
+
+    #[test]
+    fn inserting_one_of_a_stack_leaves_the_rest_in_that_hand() {
+        let inventory = inventory();
+        inventory.set_held_item(ItemStack::new(3, &Item::BOOK));
+        let hand = match Hand::from_packet_id(0) {
+            Ok(hand) => hand,
+            Err(_) => panic!("packet hand 0 is the main hand"),
+        };
+        let mut hand_stack = inventory.get_stack_in_hand(hand);
+        let before = hand_stack.clone();
+        let shelf = ChiseledBookshelfBlockEntity::new(BlockPos::ZERO);
+        shelf.set_book(0, hand_stack.split_unless_creative(GameMode::Survival, 1));
+        crate::item::store_used_hand(&inventory, hand, &before, hand_stack);
+
+        assert_eq!(inventory.held_item().item_count, 2);
+        assert!(inventory.off_hand_item().is_empty());
+        assert_eq!(shelf.get_stack(0).item_count, 1);
+    }
+}

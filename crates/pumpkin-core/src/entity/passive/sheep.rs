@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicU8, Ordering},
 };
 
+use pumpkin_data::damage::DamageType;
 use pumpkin_data::{entity::EntityType, item::Item};
 use pumpkin_nbt::compound::NbtCompound;
 use rand::RngExt;
@@ -23,6 +24,7 @@ use crate::entity::{
 
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::sound::Sound;
+use pumpkin_util::Hand;
 
 const TEMPT_ITEMS: &[&Item] = &[&Item::WHEAT];
 
@@ -105,6 +107,14 @@ impl SheepEntity {
     }
 }
 
+fn death_wool_item(color: u8, sheared: bool) -> Option<&'static Item> {
+    if sheared {
+        None
+    } else {
+        Some(super::animal::get_wool_item_for_color(color))
+    }
+}
+
 impl AgeableMob for SheepEntity {
     fn get_ageable_data(&self) -> &crate::entity::ageable::AgeableData {
         &self.ageable_data
@@ -153,14 +163,39 @@ impl Mob for SheepEntity {
         self.set_sheared(false);
     }
 
+    fn on_damage(&self, _damage_type: DamageType, _source: Option<&dyn EntityBase>) {
+        if !self.mob_entity.living_entity.dead.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(wool) = death_wool_item(self.get_color(), self.is_sheared()) else {
+            return;
+        };
+        let entity = self.get_entity();
+        let world = entity.world.load();
+        world.drop_stack(&entity.block_pos.load(), ItemStack::new(1, wool));
+    }
+
     fn mob_interact(&self, player: &Arc<Player>, item_stack: &mut ItemStack) -> bool {
         use super::animal::{Animal, get_dye_color_from_item, get_wool_item_for_color};
         let item = item_stack.get_item();
 
         if item == &Item::SHEARS && !self.is_sheared() && !self.is_baby() {
-            self.set_sheared(true);
             let entity = self.get_entity();
             let world = entity.world.load();
+            if let Some(server) = world.server.upgrade() {
+                let mut event =
+                    crate::plugin::api::events::player::player_shear_entity::PlayerShearEntityEvent {
+                        player: player.clone(),
+                        entity_id: entity.entity_id,
+                        hand: 0,
+                        cancelled: false,
+                    };
+                server.plugin_manager.fire_blocking(&server, &mut event);
+                if event.cancelled {
+                    return false;
+                }
+            }
+            self.set_sheared(true);
             let pos = entity.pos.load();
             world.play_sound(
                 Sound::EntitySheepShear,
@@ -177,6 +212,7 @@ impl Mob for SheepEntity {
             ));
             world.spawn_entity(item_entity);
             player.damage_held_item(1);
+            player.swing_hand(Hand::Right, true);
             return true;
         }
 
@@ -190,5 +226,46 @@ impl Mob for SheepEntity {
         }
 
         self.animal_interact(player, item_stack, Sound::EntitySheepAmbient)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::death_wool_item;
+    use pumpkin_data::item::Item;
+
+    #[test]
+    fn death_wool_matches_sheep_color() {
+        let colors = [
+            &Item::WHITE_WOOL,
+            &Item::ORANGE_WOOL,
+            &Item::MAGENTA_WOOL,
+            &Item::LIGHT_BLUE_WOOL,
+            &Item::YELLOW_WOOL,
+            &Item::LIME_WOOL,
+            &Item::PINK_WOOL,
+            &Item::GRAY_WOOL,
+            &Item::LIGHT_GRAY_WOOL,
+            &Item::CYAN_WOOL,
+            &Item::PURPLE_WOOL,
+            &Item::BLUE_WOOL,
+            &Item::BROWN_WOOL,
+            &Item::GREEN_WOOL,
+            &Item::RED_WOOL,
+            &Item::BLACK_WOOL,
+        ];
+        for (color, item) in colors.into_iter().enumerate() {
+            assert_eq!(
+                death_wool_item(color as u8, false).map(|wool| wool.id),
+                Some(item.id)
+            );
+        }
+    }
+
+    #[test]
+    fn sheared_sheep_drops_no_wool() {
+        for color in 0..16 {
+            assert!(death_wool_item(color, true).is_none());
+        }
     }
 }

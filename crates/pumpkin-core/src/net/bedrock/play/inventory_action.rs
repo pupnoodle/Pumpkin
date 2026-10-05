@@ -208,6 +208,7 @@ impl BedrockClient {
                         held_item = client_stack;
                     }
 
+                    let before_use = held_item.clone();
                     let result = server.block_registry.use_with_item(
                         block,
                         player,
@@ -223,6 +224,11 @@ impl BedrockClient {
                     );
 
                     if result.consumes_action() {
+                        if let Some(updated) =
+                            crate::item::stored_stack_after_use(&before_use, held_item)
+                        {
+                            player.inventory().set_held_item(updated);
+                        }
                         return;
                     }
 

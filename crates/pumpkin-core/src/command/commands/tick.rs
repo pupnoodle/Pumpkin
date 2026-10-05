@@ -155,25 +155,6 @@ impl TickExecutor {
         );
     }
 
-    fn send_sprint_report(source: &CommandSource, ticks: i32) {
-        source.send_feedback(
-            TextComponent::translate_cross(
-                translation::java::COMMANDS_TICK_SPRINT_REPORT,
-                translation::java::COMMANDS_TICK_SPRINT_REPORT,
-                [TextComponent::text(ticks.to_string())],
-            ),
-            true,
-        );
-        source.send_feedback(
-            TextComponent::translate_cross(
-                translation::java::COMMANDS_TICK_STATUS_SPRINTING,
-                translation::java::COMMANDS_TICK_STATUS_SPRINTING,
-                [],
-            ),
-            true,
-        );
-    }
-
     fn handle_set_tick_rate(
         source: &CommandSource,
         manager: &crate::server::tick_rate_manager::ServerTickRateManager,
@@ -287,7 +268,14 @@ impl CommandExecutor for TickExecutor {
             SubCommand::SprintTimed => {
                 let ticks = TimeArgumentType::get(context, "time")?;
                 manager.request_game_to_sprint(server, ticks as i64);
-                Self::send_sprint_report(source, ticks);
+                source.send_feedback(
+                    TextComponent::translate_cross(
+                        translation::java::COMMANDS_TICK_STATUS_SPRINTING,
+                        translation::java::COMMANDS_TICK_STATUS_SPRINTING,
+                        [],
+                    ),
+                    true,
+                );
                 Ok(1)
             }
             SubCommand::SprintStop => {

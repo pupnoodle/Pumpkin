@@ -14,13 +14,14 @@
 )]
 
 use crate::command::argument_builder::{
-    ArgumentBuilder, RequiredArgumentBuilder, argument, command, literal,
+    ArgumentBuilder, LiteralArgumentBuilder, RequiredArgumentBuilder, argument, command, literal,
 };
 use crate::command::argument_types::block::BlockArgumentType;
 use crate::command::argument_types::coordinates::block_pos::BlockPosArgumentType;
 use crate::command::argument_types::coordinates::rotation::RotationArgumentType;
 use crate::command::argument_types::coordinates::swizzle::SwizzleArgumentType;
 use crate::command::argument_types::coordinates::vec3::Vec3ArgumentType;
+use crate::command::argument_types::core::double::DoubleArgumentType;
 use crate::command::argument_types::core::string::StringArgumentType;
 use crate::command::argument_types::entity::EntityArgumentType;
 use crate::command::argument_types::entity_anchor::{EntityAnchorArgumentType, EntityAnchorExt};
@@ -33,9 +34,10 @@ use crate::command::argument_types::resource_key::{BIOME_REGISTRY, ResourceKeyAr
 use crate::command::argument_types::resource_or_tag::{ResourceOrTag, ResourceOrTagArgument};
 use crate::command::argument_types::score_holder::ScoreHolderArgumentType;
 use crate::command::commands::data::{
-    BlockDataAccessor, DataAccessor, EntityDataAccessor, StorageDataAccessor,
+    BlockDataAccessor, DataAccessor, ERROR_ENTITY_INVALID, EntityDataAccessor, StorageDataAccessor,
 };
 use crate::command::context::command_context::CommandContext;
+use crate::command::context::command_source::{ReturnValue, ReturnValueCallable};
 use crate::command::errors::command_syntax_error::CommandSyntaxError;
 use crate::command::errors::error_types::CommandErrorType;
 use crate::command::node::attached::{CommandNodeId, NodeId};
@@ -71,6 +73,11 @@ static ERROR_INVALID_DIMENSION: CommandErrorType<1> =
 const ERROR_CONDITIONAL_FAILED: CommandErrorType<0> = CommandErrorType::new(
     translation::java::COMMANDS_EXECUTE_CONDITIONAL_FAIL,
     translation::java::COMMANDS_EXECUTE_CONDITIONAL_FAIL,
+);
+
+static ERROR_UNKNOWN_BOSSBAR: CommandErrorType<1> = CommandErrorType::new(
+    translation::java::COMMANDS_BOSSBAR_UNKNOWN,
+    translation::bedrock::COMMANDS_BOSSBAR_NOTFOUND,
 );
 
 static DIMENSION_REGISTRY: &Identifier = &Identifier::vanilla_static("dimension");
@@ -281,8 +288,8 @@ fn execute_if_block_modifier(
     let expected_block = BlockArgumentType::get(context, "block")?;
 
     if let Some(ref world) = context.source.world {
-        let block = world.get_block(&pos);
-        if block == expected_block {
+        let block_state = world.get_block_state_id(&pos);
+        if block_state == expected_block.state {
             return Ok(vec![context.source.clone()]);
         }
     }
@@ -296,8 +303,8 @@ fn execute_unless_block_modifier(
     let expected_block = BlockArgumentType::get(context, "block")?;
 
     if let Some(ref world) = context.source.world {
-        let block = world.get_block(&pos);
-        if block != expected_block {
+        let block_state = world.get_block_state_id(&pos);
+        if block_state != expected_block.state {
             return Ok(vec![context.source.clone()]);
         }
     } else {
@@ -1073,6 +1080,305 @@ fn execute_on_origin_modifier(
     execute_on_owner_modifier(context)
 }
 
+#[derive(Clone, Copy)]
+enum StoredNumberType {
+    Byte,
+    Short,
+    Int,
+    Long,
+    Float,
+    Double,
+}
+
+#[derive(Clone, Copy)]
+enum NbtStoreKind {
+    Block,
+    Entity,
+    Storage,
+}
+
+struct StoreCallback<F>(F);
+
+impl<F> ReturnValueCallable for StoreCallback<F>
+where
+    F: Fn(ReturnValue) + Send + Sync,
+{
+    fn call(&self, value: ReturnValue) {
+        self.0(value);
+    }
+}
+
+fn stored_amount(value: ReturnValue, store_result: bool) -> i32 {
+    if store_result {
+        value.result_value()
+    } else {
+        i32::from(value.success_value())
+    }
+}
+
+fn attach_store(
+    context: &CommandContext,
+    callback: impl Fn(ReturnValue) + Send + Sync + 'static,
+) -> RedirectModifierResult {
+    let mut source = context.source.as_ref().clone();
+    source
+        .command_result_taker
+        .0
+        .push(Arc::new(StoreCallback(callback)));
+    Ok(vec![Arc::new(source)])
+}
+
+fn scaled_floor(scaled: f64, min: i64, max: i64) -> i64 {
+    if !scaled.is_finite() {
+        return if scaled.is_sign_negative() { min } else { max };
+    }
+    (scaled.floor() as i64).clamp(min, max)
+}
+
+fn number_tag(kind: StoredNumberType, value: i32, scale: f64) -> NbtTag {
+    let scaled = f64::from(value) * scale;
+    match kind {
+        StoredNumberType::Byte => {
+            NbtTag::Byte(scaled_floor(scaled, i64::from(i8::MIN), i64::from(i8::MAX)) as i8)
+        }
+        StoredNumberType::Short => {
+            NbtTag::Short(scaled_floor(scaled, i64::from(i16::MIN), i64::from(i16::MAX)) as i16)
+        }
+        StoredNumberType::Int => {
+            NbtTag::Int(scaled_floor(scaled, i64::from(i32::MIN), i64::from(i32::MAX)) as i32)
+        }
+        StoredNumberType::Long => NbtTag::Long(scaled_floor(scaled, i64::MIN, i64::MAX)),
+        StoredNumberType::Float => NbtTag::Float(scaled as f32),
+        StoredNumberType::Double => NbtTag::Double(scaled),
+    }
+}
+
+fn store_number(accessor: &dyn DataAccessor, path: &NbtPath, tag: NbtTag) {
+    let Ok(data) = accessor.get_data() else {
+        return;
+    };
+    let mut root = NbtTag::Compound(data);
+    if path.set(&mut root, tag).is_err() {
+        return;
+    }
+    let NbtTag::Compound(updated) = root else {
+        return;
+    };
+    let _ = accessor.set_data(&updated);
+}
+
+fn store_score(context: &CommandContext, store_result: bool) -> RedirectModifierResult {
+    let holders = ScoreHolderArgumentType::get_score_holders(context, "targets")?;
+    let objective = ObjectiveArgumentType::get(context, "objective")?.to_string();
+    let world = context.world().clone();
+    let scoreboard = world
+        .scoreboard
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    ObjectiveArgumentType::writable_objective_or_error(&scoreboard, &objective)?;
+    drop(scoreboard);
+    let names: Vec<String> = holders.into_iter().map(|holder| holder.name).collect();
+    attach_store(context, move |value| {
+        let amount = stored_amount(value, store_result);
+        let mut scoreboard = world
+            .scoreboard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for name in &names {
+            scoreboard.set_score_value(&world, name.clone(), objective.clone(), amount);
+        }
+    })
+}
+
+fn store_bossbar(
+    context: &CommandContext,
+    store_result: bool,
+    is_value: bool,
+) -> RedirectModifierResult {
+    let id = context.get_argument::<Identifier>("id")?.to_string();
+    let server = context.server().clone();
+    {
+        let bossbars = server
+            .bossbars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !bossbars.has_bossbar(&id) {
+            return Err(ERROR_UNKNOWN_BOSSBAR.create_without_context(TextComponent::text(id)));
+        }
+    }
+    attach_store(context, move |value| {
+        let amount = stored_amount(value, store_result);
+        let mut bossbars = server
+            .bossbars
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(bar) = bossbars.get_bossbar(&id) else {
+            return;
+        };
+        if is_value {
+            let stored = amount.clamp(0, bar.max.max(0));
+            if stored != bar.value {
+                let _ = bossbars.update_value(&server, id.clone(), stored);
+            }
+        } else {
+            let stored = amount.max(1);
+            if stored != bar.max {
+                let _ = bossbars.update_max(&server, id.clone(), stored);
+            }
+        }
+    })
+}
+
+fn store_nbt(
+    context: &CommandContext,
+    kind: NbtStoreKind,
+    number_type: StoredNumberType,
+    store_result: bool,
+) -> RedirectModifierResult {
+    let path = context.get_argument::<NbtPath>("path")?.clone();
+    let scale = DoubleArgumentType::get(context, "scale")?;
+    match kind {
+        NbtStoreKind::Block => {
+            let pos = BlockPosArgumentType::get_block_pos(context, "pos")?;
+            let world = context.world().clone();
+            BlockDataAccessor::new(pos, world.clone())?;
+            attach_store(context, move |value| {
+                let tag = number_tag(number_type, stored_amount(value, store_result), scale);
+                if let Ok(accessor) = BlockDataAccessor::new(pos, world.clone()) {
+                    store_number(&accessor, &path, tag);
+                }
+            })
+        }
+        NbtStoreKind::Entity => {
+            let entity = EntityArgumentType::get_entity(context, "target")?;
+            if entity.get_player().is_some() {
+                return Err(ERROR_ENTITY_INVALID.create_without_context());
+            }
+            attach_store(context, move |value| {
+                let tag = number_tag(number_type, stored_amount(value, store_result), scale);
+                store_number(&EntityDataAccessor::new(entity.clone()), &path, tag);
+            })
+        }
+        NbtStoreKind::Storage => {
+            let id = context.get_argument::<Identifier>("id")?.to_string();
+            let server = context.server().clone();
+            attach_store(context, move |value| {
+                let tag = number_tag(number_type, stored_amount(value, store_result), scale);
+                store_number(
+                    &StorageDataAccessor::new(id.clone(), server.clone()),
+                    &path,
+                    tag,
+                );
+            })
+        }
+    }
+}
+
+fn score_store_modifier(store_result: bool) -> RedirectModifier {
+    RedirectModifier::Custom(Arc::new(move |context: &CommandContext| {
+        store_score(context, store_result)
+    }))
+}
+
+fn bossbar_store_modifier(store_result: bool, is_value: bool) -> RedirectModifier {
+    RedirectModifier::Custom(Arc::new(move |context: &CommandContext| {
+        store_bossbar(context, store_result, is_value)
+    }))
+}
+
+fn nbt_store_modifier(
+    kind: NbtStoreKind,
+    number_type: StoredNumberType,
+    store_result: bool,
+) -> RedirectModifier {
+    RedirectModifier::Custom(Arc::new(move |context: &CommandContext| {
+        store_nbt(context, kind, number_type, store_result)
+    }))
+}
+
+fn append_number_types(
+    mut path: RequiredArgumentBuilder,
+    kind: NbtStoreKind,
+    store_result: bool,
+) -> RequiredArgumentBuilder {
+    for (name, number_type) in [
+        ("byte", StoredNumberType::Byte),
+        ("short", StoredNumberType::Short),
+        ("int", StoredNumberType::Int),
+        ("long", StoredNumberType::Long),
+        ("float", StoredNumberType::Float),
+        ("double", StoredNumberType::Double),
+    ] {
+        path = path.then(literal(name).then(
+            argument("scale", DoubleArgumentType::any()).redirect_with_modifier(
+                Redirection::Root,
+                nbt_store_modifier(kind, number_type, store_result),
+            ),
+        ));
+    }
+    path
+}
+
+fn store_targets(store_result: bool) -> LiteralArgumentBuilder {
+    literal(if store_result { "result" } else { "success" })
+        .then(
+            literal("score").then(
+                argument("targets", ScoreHolderArgumentType::Multiple).then(
+                    argument("objective", ObjectiveArgumentType).redirect_with_modifier(
+                        Redirection::Root,
+                        score_store_modifier(store_result),
+                    ),
+                ),
+            ),
+        )
+        .then(
+            literal("bossbar").then(
+                argument("id", IdentifierArgumentType)
+                    .then(literal("value").redirect_with_modifier(
+                        Redirection::Root,
+                        bossbar_store_modifier(store_result, true),
+                    ))
+                    .then(literal("max").redirect_with_modifier(
+                        Redirection::Root,
+                        bossbar_store_modifier(store_result, false),
+                    )),
+            ),
+        )
+        .then(
+            literal("block").then(
+                argument("pos", BlockPosArgumentType).then(append_number_types(
+                    argument("path", NbtPathArgumentType),
+                    NbtStoreKind::Block,
+                    store_result,
+                )),
+            ),
+        )
+        .then(
+            literal("entity").then(argument("target", EntityArgumentType::Entity).then(
+                append_number_types(
+                    argument("path", NbtPathArgumentType),
+                    NbtStoreKind::Entity,
+                    store_result,
+                ),
+            )),
+        )
+        .then(
+            literal("storage").then(argument("id", IdentifierArgumentType).then(
+                append_number_types(
+                    argument("path", NbtPathArgumentType),
+                    NbtStoreKind::Storage,
+                    store_result,
+                ),
+            )),
+        )
+}
+
+fn store_command() -> LiteralArgumentBuilder {
+    literal("store")
+        .then(store_targets(true))
+        .then(store_targets(false))
+}
+
 fn execute_on_passengers_modifier(
     context: &CommandContext,
 ) -> crate::command::node::RedirectModifierResult {
@@ -1547,7 +1853,8 @@ pub fn register(dispatcher: &mut CommandDispatcher, registry: &PermissionRegistr
                         ),
                     )),
                 ),
-        );
+        )
+        .then(store_command());
 
     let execute_node_id = dispatcher.register(builder);
 
@@ -1655,6 +1962,37 @@ mod tests {
                 let result = dispatcher.parse_input(&input, &source);
                 assert!(!result.errors.is_empty(), "{input}");
             }
+        }
+    }
+
+    #[test]
+    fn store_accepts_vanilla_forms() {
+        let mut dispatcher = CommandDispatcher::new();
+        let registry = PermissionRegistry::default();
+        register(&mut dispatcher, &registry);
+        super::super::time::register(&mut dispatcher, &registry);
+        let source = Arc::new(CommandSource::dummy());
+        for input in [
+            "execute store result score value repro run time query daytime",
+            "execute store success score value repro run time query daytime",
+            "execute store result score #temp obj store success score $x obj2 run time query daytime",
+            "execute store result block ~ ~ ~ Foo int 1 run time query daytime",
+            "execute store success block 0 64 0 Data.Value short -1.5 run time query daytime",
+            "execute store result entity @s Health float 1 run time query daytime",
+            "execute store success storage minecraft:test path double 1.0 run time query daytime",
+            "execute store result storage foo bar byte 1 run time query daytime",
+            "execute store result bossbar minecraft:bar value run time query daytime",
+            "execute store success bossbar bar max run time query daytime",
+            "execute store result score value repro if entity @s run time query daytime",
+        ] {
+            let result = dispatcher.parse_input(input, &source);
+            assert!(result.errors.is_empty(), "{input}: {:?}", result.errors);
+            assert_eq!(result.reader.remaining_length(), 0, "{input}");
+            let context = result.context.build(input);
+            assert!(
+                context.get_last_child().command.is_some(),
+                "{input} did not reach a command"
+            );
         }
     }
 }

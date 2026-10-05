@@ -160,11 +160,11 @@ impl Mob for OcelotEntity {
             .load()
             .squared_distance_to_vec(&player.get_entity().pos.load());
 
-        if !self.is_trusting() && is_food && dist_sqr < 9.0 {
+        if super::tamable::should_attempt_tame(self.is_trusting()) && is_food && dist_sqr < 9.0 {
             item_stack.decrement_unless_creative(player.gamemode.load(), 1);
 
             let mut rng = rand::rng();
-            if rng.random_range(0..3) == 0 {
+            if super::tamable::tame_roll_succeeds(rng.random_range(0..3)) {
                 self.set_trusting(true);
                 self.get_entity().world.load().send_entity_status(
                     self.get_entity(),

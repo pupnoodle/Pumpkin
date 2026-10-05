@@ -2,7 +2,9 @@ use std::sync::Arc;
 
 use pumpkin_data::translation;
 use pumpkin_util::PermissionLvl;
+use pumpkin_util::math::get_section_cord;
 use pumpkin_util::math::position::BlockPos;
+use pumpkin_util::math::vector2::Vector2;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::permission::{Permission, PermissionDefault, PermissionRegistry};
 use pumpkin_util::text::TextComponent;
@@ -56,6 +58,27 @@ fn success_key_and_arg(
     }
 }
 
+fn load_destination_chunks(world: &World, pos: &Vector3<f64>) {
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let center_chunk = Vector2::new(
+        get_section_cord(pos.x.floor() as i32),
+        get_section_cord(pos.z.floor() as i32),
+    );
+    tokio::task::block_in_place(|| {
+        handle.block_on(async {
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let chunk_pos =
+                        Vector2::new(center_chunk.x + dx, center_chunk.y + dz);
+                    world.level.get_or_fetch_chunk(chunk_pos, |_| ()).await;
+                }
+            }
+        });
+    });
+}
+
 struct SelfToPosExecutor;
 
 impl CommandExecutor for SelfToPosExecutor {
@@ -70,6 +93,7 @@ impl CommandExecutor for SelfToPosExecutor {
         let yaw = entity.get_entity().yaw.load();
         let pitch = entity.get_entity().pitch.load();
         let world = context.source.world();
+        load_destination_chunks(world, &pos);
         entity.teleport(pos, Some(yaw), Some(pitch), world.clone());
 
         context.source.send_feedback(
@@ -107,6 +131,7 @@ impl CommandExecutor for SelfToEntityExecutor {
             return Err(ERROR_INVALID_POSITION.create_without_context());
         }
 
+        load_destination_chunks(&world, &pos);
         entity.teleport(pos, Some(yaw), Some(pitch), world);
 
         context.source.send_feedback(
@@ -141,6 +166,7 @@ impl CommandExecutor for EntitiesToEntityExecutor {
             return Err(ERROR_INVALID_POSITION.create_without_context());
         }
 
+        load_destination_chunks(&world, &pos);
         for target in &targets {
             target.teleport(pos, Some(yaw), Some(pitch), world.clone());
         }
@@ -175,6 +201,7 @@ impl CommandExecutor for EntitiesToPosExecutor {
         }
 
         let world = context.source.world();
+        load_destination_chunks(world, &pos);
         for target in &targets {
             let yaw = target.get_entity().yaw.load();
             let pitch = target.get_entity().pitch.load();
@@ -219,6 +246,7 @@ impl CommandExecutor for EntitiesToPosWithRotationExecutor {
         let yaw = rot.y;
         let pitch = rot.x;
         let world = context.source.world();
+        load_destination_chunks(world, &pos);
 
         for target in &targets {
             target.teleport(pos, Some(yaw), Some(pitch), world.clone());
@@ -261,6 +289,7 @@ impl CommandExecutor for EntitiesToPosFacingPosExecutor {
         let facing_pos =
             Vec3ArgumentType::get_coordinates(context, "facingLocation")?.resolve(&context.source);
         let world = context.source.world();
+        load_destination_chunks(world, &pos);
 
         for target in &targets {
             let eye_offset = match context.source.entity_anchor {
@@ -317,6 +346,7 @@ impl CommandExecutor for EntitiesToPosFacingEntityExecutor {
 
         let facing_pos = anchor.position_at_entity(facing_entity.get_entity());
         let world = context.source.world();
+        load_destination_chunks(world, &pos);
 
         for target in &targets {
             let eye_offset = match context.source.entity_anchor {

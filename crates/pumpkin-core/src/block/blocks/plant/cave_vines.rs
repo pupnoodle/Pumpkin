@@ -1,7 +1,7 @@
 use pumpkin_data::block_properties::{CaveVinesLikeProperties, CaveVinesPlantLikeProperties};
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
-use pumpkin_data::{Block, BlockDirection, BlockId, BlockStateId};
+use pumpkin_data::{Block, BlockDirection, BlockId, BlockState, BlockStateId};
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_world::world::{BlockAccessor, BlockFlags};
 
@@ -104,6 +104,21 @@ impl BlockBehaviour for CaveVinesBlock {
         }
     }
 
+    fn adjust_drops(&self, state: &BlockState, mut drops: Vec<ItemStack>) -> Vec<ItemStack> {
+        let block = Block::from_state_id(state.id);
+        let has_berries = if block == &Block::CAVE_VINES {
+            CaveVinesLikeProperties::from_state_id(state.id).berries
+        } else if block == &Block::CAVE_VINES_PLANT {
+            CaveVinesPlantLikeProperties::from_state_id(state.id).berries
+        } else {
+            return drops;
+        };
+        if !has_berries {
+            drops.retain(|stack| stack.item.id != Item::GLOW_BERRIES.id);
+        }
+        drops
+    }
+
     fn perform_bonemeal(&self, args: BonemealArgs<'_>) {
         if args.block == &Block::CAVE_VINES {
             let mut props = CaveVinesLikeProperties::from_state_id(args.state_id);
@@ -121,6 +136,52 @@ impl BlockBehaviour for CaveVinesBlock {
                 props.to_state_id(args.block),
                 BlockFlags::NOTIFY_ALL,
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pumpkin_data::BlockState;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+
+    fn vine_state(berries: bool) -> &'static BlockState {
+        let mut props = CaveVinesLikeProperties::default(&Block::CAVE_VINES);
+        props.berries = berries;
+        BlockState::from_id(props.to_state_id(&Block::CAVE_VINES))
+    }
+
+    fn plant_state(berries: bool) -> &'static BlockState {
+        let mut props = CaveVinesPlantLikeProperties::default(&Block::CAVE_VINES_PLANT);
+        props.berries = berries;
+        BlockState::from_id(props.to_state_id(&Block::CAVE_VINES_PLANT))
+    }
+
+    fn glow_berry_count(drops: &[ItemStack]) -> u32 {
+        drops
+            .iter()
+            .filter(|stack| stack.item.id == Item::GLOW_BERRIES.id)
+            .map(|stack| u32::from(stack.item_count))
+            .sum()
+    }
+
+    #[test]
+    fn vines_without_berries_do_not_drop_glow_berries() {
+        for state in [vine_state(false), plant_state(false)] {
+            let drops =
+                CaveVinesBlock.adjust_drops(state, vec![ItemStack::new(1, &Item::GLOW_BERRIES)]);
+            assert_eq!(glow_berry_count(&drops), 0);
+        }
+    }
+
+    #[test]
+    fn vines_with_berries_drop_one_glow_berry() {
+        for state in [vine_state(true), plant_state(true)] {
+            let drops =
+                CaveVinesBlock.adjust_drops(state, vec![ItemStack::new(1, &Item::GLOW_BERRIES)]);
+            assert_eq!(glow_berry_count(&drops), 1);
         }
     }
 }

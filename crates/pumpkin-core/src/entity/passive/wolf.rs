@@ -358,10 +358,13 @@ impl Mob for WolfEntity {
                 }
                 return parent_interaction;
             }
-        } else if item == &Item::BONE && !self.mob_entity.is_attacking() {
+        } else if super::tamable::should_attempt_tame(self.is_tame())
+            && item == &Item::BONE
+            && !self.mob_entity.is_attacking()
+        {
             item_stack.decrement_unless_creative(player.gamemode.load(), 1);
             let mut rng = rand::rng();
-            if rng.random_range(0..3) == 0 {
+            if super::tamable::tame_roll_succeeds(rng.random_range(0..3)) {
                 TamableAnimal::tame(self, player.gameprofile.id);
                 self.set_ordered_to_sit(true);
                 self.spawn_taming_particles(true);

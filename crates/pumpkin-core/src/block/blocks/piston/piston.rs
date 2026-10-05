@@ -18,7 +18,10 @@ use crate::{
     block::{
         BlockBehaviour, BlockMetadata, BrokenArgs, OnNeighborUpdateArgs, OnPlaceArgs,
         OnSyncedBlockEventArgs, PathComputationType, PlacedArgs,
-        blocks::{piston::piston_head::PistonHeadProperties, redstone::is_emitting_redstone_power},
+        blocks::{
+            piston::piston_head::PistonHeadProperties,
+            redstone::{get_max_strong_power_except, is_emitting_redstone_power},
+        },
     },
     world::World,
 };
@@ -307,9 +310,7 @@ fn should_extend(world: &World, block_pos: &BlockPos, piston_dir: BlockDirection
         }
         return true;
     }
-    let neighbor_pos = block_pos.offset(BlockDirection::Down.to_offset());
-    let (block, state) = world.get_block_and_state(&neighbor_pos);
-    if is_emitting_redstone_power(block, state, world, block_pos, BlockDirection::Down) {
+    if get_max_strong_power_except(world, block_pos, piston_dir, true) > 0 {
         return true;
     }
     for dir in BlockDirection::all() {

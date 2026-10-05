@@ -6,6 +6,7 @@ use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::sound::{Sound, SoundCategory};
 use pumpkin_nbt::compound::NbtCompound;
+use pumpkin_util::Hand;
 
 use crate::entity::{
     Entity, EntityBase,
@@ -133,6 +134,10 @@ impl Mob for SnowGolemEntity {
         &self.mob_entity
     }
 
+    fn is_sensitive_to_water(&self) -> bool {
+        true
+    }
+
     fn mob_init_data_tracker(&self) {
         let entity = self.get_entity();
         let flags = if self.has_pumpkin() { 16u8 } else { 0u8 };
@@ -155,6 +160,7 @@ impl Mob for SnowGolemEntity {
             ));
             world.spawn_entity(item_entity);
             player.damage_held_item(1);
+            player.swing_hand(Hand::Right, true);
             return true;
         }
         false

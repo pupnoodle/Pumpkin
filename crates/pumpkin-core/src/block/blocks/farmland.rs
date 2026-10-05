@@ -54,71 +54,87 @@ impl BlockBehaviour for FarmlandBlock {
     }
 
     fn random_tick(&self, args: RandomTickArgs<'_>) {
-        // TODO: add rain check. Remember to check which one is most optimized.
-        if is_water_nearby(args.world, args.position) {
-            let mut props = FarmlandProperties::default(args.block);
-            let mut new_moisture = 7;
-            if let Some(server) = args.world.server.upgrade() {
-                let mut event =
-                    crate::plugin::api::events::block::moisture_change::MoistureChangeEvent::new(
-                        *args.position,
-                        args.world.clone(),
-                        new_moisture,
-                    );
-                server.plugin_manager.fire_blocking(&server, &mut event);
-                if event.cancelled {
-                    return;
-                }
-                new_moisture = event.new_moisture;
-            }
-            props.moisture = new_moisture.clamp(0, 7) as u8;
-            args.world.set_block_state(
-                args.position,
-                props.to_state_id(args.block),
-                BlockFlags::NOTIFY_NEIGHBORS,
-            );
-        } else {
-            let state_id = args.world.get_block_state_id(args.position);
-            let mut props = FarmlandProperties::from_state_id(state_id);
-            if props.moisture == 0 {
-                if !args
-                    .world
-                    .get_block(&args.position.up())
-                    .has_tag(&tag::Block::MINECRAFT_MAINTAINS_FARMLAND)
-                {
-                    //TODO push entities up
-                    args.world.set_block_state(
-                        args.position,
-                        Block::DIRT.default_state.id,
-                        BlockFlags::NOTIFY_NEIGHBORS,
-                    );
-                }
-            } else {
-                let mut new_moisture = (props.moisture as i32 - 1).clamp(0, 7);
-                if let Some(server) = args.world.server.upgrade() {
-                    let mut event = crate::plugin::api::events::block::moisture_change::MoistureChangeEvent::new(
-                        *args.position,
-                        args.world.clone(),
-                        new_moisture,
-                    );
-                    server.plugin_manager.fire_blocking(&server, &mut event);
-                    if event.cancelled {
-                        return;
-                    }
-                    new_moisture = event.new_moisture;
-                }
-                props.moisture = new_moisture.clamp(0, 7) as u8;
+        let state_id = args.world.get_block_state_id(args.position);
+        let mut props = FarmlandProperties::from_state_id(state_id);
+        let above = args.position.up();
+        let mut new_moisture = match farmland_tick(
+            props.moisture,
+            is_water_nearby(args.world, args.position),
+            rain_reaches_farmland(
+                args.world.is_raining(),
+                args.world.get_block_state(&above).is_solid(),
+            ),
+            args.world
+                .get_block(&above)
+                .has_tag(&tag::Block::MINECRAFT_MAINTAINS_FARMLAND),
+        ) {
+            FarmlandTick::Stay => return,
+            FarmlandTick::RevertToDirt => {
+                //TODO push entities up
                 args.world.set_block_state(
                     args.position,
-                    props.to_state_id(args.block),
+                    Block::DIRT.default_state.id,
                     BlockFlags::NOTIFY_NEIGHBORS,
                 );
+                return;
             }
+            FarmlandTick::Hydrate => 7,
+            FarmlandTick::Dry => (props.moisture as i32 - 1).clamp(0, 7),
+        };
+        if let Some(server) = args.world.server.upgrade() {
+            let mut event =
+                crate::plugin::api::events::block::moisture_change::MoistureChangeEvent::new(
+                    *args.position,
+                    args.world.clone(),
+                    new_moisture,
+                );
+            server.plugin_manager.fire_blocking(&server, &mut event);
+            if event.cancelled {
+                return;
+            }
+            new_moisture = event.new_moisture;
         }
+        props.moisture = new_moisture.clamp(0, 7) as u8;
+        args.world.set_block_state(
+            args.position,
+            props.to_state_id(args.block),
+            BlockFlags::NOTIFY_NEIGHBORS,
+        );
     }
 
     fn is_pathfindable(&self, _state: &BlockState, _computation_type: PathComputationType) -> bool {
         false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FarmlandTick {
+    Hydrate,
+    Dry,
+    RevertToDirt,
+    Stay,
+}
+
+const fn rain_reaches_farmland(raining: bool, solid_above: bool) -> bool {
+    raining && !solid_above
+}
+
+const fn farmland_tick(
+    moisture: u8,
+    water_nearby: bool,
+    rain_reaches: bool,
+    maintains_farmland: bool,
+) -> FarmlandTick {
+    if water_nearby || rain_reaches {
+        FarmlandTick::Hydrate
+    } else if moisture == 0 {
+        if maintains_farmland {
+            FarmlandTick::Stay
+        } else {
+            FarmlandTick::RevertToDirt
+        }
+    } else {
+        FarmlandTick::Dry
     }
 }
 
@@ -144,4 +160,42 @@ fn is_water_nearby(world: &Arc<World>, block_pos: &BlockPos) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rain_hydrates_exposed_farmland_and_dry_weather_dries_it() {
+        assert!(rain_reaches_farmland(true, false));
+        assert!(!rain_reaches_farmland(true, true));
+        assert!(!rain_reaches_farmland(false, false));
+        assert_eq!(
+            farmland_tick(0, false, rain_reaches_farmland(true, false), false),
+            FarmlandTick::Hydrate
+        );
+        assert_eq!(
+            farmland_tick(6, false, rain_reaches_farmland(true, false), true),
+            FarmlandTick::Hydrate
+        );
+        assert_eq!(farmland_tick(4, true, false, false), FarmlandTick::Hydrate);
+        assert_eq!(
+            farmland_tick(4, false, rain_reaches_farmland(true, true), false),
+            FarmlandTick::Dry
+        );
+        assert_eq!(
+            farmland_tick(3, false, rain_reaches_farmland(false, false), false),
+            FarmlandTick::Dry
+        );
+        assert_eq!(
+            farmland_tick(0, false, false, false),
+            FarmlandTick::RevertToDirt
+        );
+        assert_eq!(farmland_tick(0, false, false, true), FarmlandTick::Stay);
+        assert_eq!(
+            farmland_tick(0, false, rain_reaches_farmland(true, true), false),
+            FarmlandTick::RevertToDirt
+        );
+    }
 }

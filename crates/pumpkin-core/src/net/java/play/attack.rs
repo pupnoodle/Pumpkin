@@ -31,11 +31,11 @@ impl JavaClient {
             .map(|p| Arc::clone(p) as Arc<dyn EntityBase>)
             .or_else(|| world.get_entity_by_id(entity_id.0));
         let Some(target) = target else {
-            self.try_kick(&TextComponent::translate_cross(
-                translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
-                translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
-                [],
-            ));
+            debug!(
+                "Player id {} attacked entity id {}, which was not found.",
+                player.entity_id(),
+                entity_id.0
+            );
             return;
         };
         if let Some(player_victim) = &player_target {

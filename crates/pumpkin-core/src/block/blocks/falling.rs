@@ -7,6 +7,7 @@ use crate::{
 };
 use pumpkin_data::{
     Block, BlockDirection, BlockId, BlockState, BlockStateId,
+    block_properties::SnowLikeProperties,
     fluid::Fluid,
     tag::{self, Taggable},
 };
@@ -18,11 +19,16 @@ pub struct FallingBlock;
 
 impl FallingBlock {
     #[must_use]
+    pub fn can_be_replaced_by_falling(state: &BlockState, block: &Block) -> bool {
+        if block == &Block::SNOW {
+            return SnowLikeProperties::from_state_id(state.id).layers == 1;
+        }
+        state.is_air() || block.has_tag(&tag::Block::MINECRAFT_FIRE) || state.replaceable()
+    }
+
+    #[must_use]
     pub fn can_fall_through(state: &BlockState, block: &Block) -> bool {
-        state.is_air()
-            || block.has_tag(&tag::Block::MINECRAFT_FIRE)
-            || state.is_liquid()
-            || state.replaceable()
+        state.is_liquid() || Self::can_be_replaced_by_falling(state, block)
     }
 
     #[must_use]

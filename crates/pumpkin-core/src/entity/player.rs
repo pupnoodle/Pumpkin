@@ -1448,7 +1448,7 @@ impl Player {
             return;
         }
 
-        if damage >= 100.0 {
+        if is_mace_smash && damage >= 100.0 {
             self.trigger_advancement(crate::entity::player::advancement::trigger::AdvancementTrigger::DealtOverkillDamage);
         }
 
@@ -2636,6 +2636,49 @@ impl Player {
         self.try_send_client_packet(&packet);
     }
 
+    const fn should_keep_fall_flying(on_ground: bool, chest_is_elytra: bool) -> bool {
+        !on_ground && chest_is_elytra
+    }
+
+    const fn fall_distance_while_fall_flying(is_fall_flying: bool, fall_distance: f32) -> f32 {
+        if is_fall_flying { 0.0 } else { fall_distance }
+    }
+
+    fn stack_is_elytra(stack: &ItemStack) -> bool {
+        !stack.is_empty() && stack.item == &pumpkin_data::item::Item::ELYTRA
+    }
+
+    fn chest_has_elytra(&self) -> bool {
+        let slot = EquipmentSlot::CHEST.get_offset_entity_slot_id(PlayerInventory::MAIN_SIZE as i32)
+            as usize;
+        Self::stack_is_elytra(&self.inventory.get_slot(slot))
+    }
+
+    fn prepare_fall_flying_movement(&self) {
+        let flying = self.living_entity.entity.is_fall_flying();
+        if !flying {
+            return;
+        }
+        let distance = self.living_entity.fall_distance.load();
+        self.living_entity
+            .fall_distance
+            .store(Self::fall_distance_while_fall_flying(flying, distance));
+    }
+
+    fn update_fall_flying(&self) {
+        let entity = &self.living_entity.entity;
+        if !entity.is_fall_flying() {
+            return;
+        }
+        if Self::should_keep_fall_flying(
+            entity.on_ground.load(Ordering::Relaxed),
+            self.chest_has_elytra(),
+        ) {
+            return;
+        }
+        entity.set_fall_flying(false);
+    }
+
     pub fn process_inbound_packets(&self) {
         const MAX_PACKETS_PER_TICK: usize = 64;
 
@@ -2663,6 +2706,8 @@ impl Player {
             if self.client.closed() {
                 break;
             }
+
+            self.prepare_fall_flying_movement();
 
             match self.client.as_ref() {
                 ClientPlatform::Java(client) => {
@@ -2713,6 +2758,7 @@ impl Player {
     #[expect(clippy::too_many_lines)]
     pub fn tick<'a>(&'a self, server: &'a Server) {
         self.process_inbound_packets();
+        self.update_fall_flying();
 
         if self.is_spectator() {
             self.living_entity
@@ -4640,6 +4686,48 @@ impl Player {
 
     pub fn get_ip(&self) -> String {
         self.client.address().to_string()
+    }
+
+    pub const fn death_respawn_plan(hardcore: bool, alive: bool) -> DeathRespawnPlan {
+        if hardcore && !alive {
+            DeathRespawnPlan {
+                spectate: true,
+                world_spawn: true,
+                survival_new_life: false,
+            }
+        } else {
+            DeathRespawnPlan {
+                spectate: false,
+                world_spawn: false,
+                survival_new_life: true,
+            }
+        }
+    }
+
+    pub fn enter_hardcore_spectator(self: &Arc<Self>) {
+        if self.gamemode.load() != GameMode::Spectator {
+            let changed = self.set_gamemode(GameMode::Spectator);
+            if !changed || self.gamemode.load() != GameMode::Spectator {
+                self.gamemode.store(GameMode::Spectator);
+                {
+                    let mut abilities = self
+                        .abilities
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    abilities.set_for_gamemode(GameMode::Spectator);
+                }
+                self.send_abilities_update();
+                self.living_entity
+                    .entity
+                    .invulnerable
+                    .store(true, Ordering::Relaxed);
+                self.living_entity
+                    .entity
+                    .no_physics
+                    .store(true, Ordering::Relaxed);
+            }
+        }
+        self.previous_gamemode.store(Some(GameMode::Spectator));
     }
 
     pub async fn respawn(self: &Arc<Self>) {
@@ -6853,6 +6941,9 @@ impl EntityBase for Player {
             let yaw = yaw.unwrap_or_else(|| self.living_entity.entity.yaw.load());
             let pitch = pitch.unwrap_or_else(|| self.living_entity.entity.pitch.load());
             self.request_teleport(position, yaw, pitch);
+            if let Some(player_arc) = self.world().get_player_by_uuid(self.gameprofile.id) {
+                crate::world::chunker::update_position(&player_arc);
+            }
             let entity = self.get_entity();
             let chunk_pos = entity.chunk_pos.load();
             entity.world.load().broadcast_to_chunk_except(
@@ -6970,7 +7061,7 @@ impl EntityBase for Player {
             .write_nbt(nbt);
 
         let total_exp = experience::points_to_level(self.experience_level.load(Ordering::Relaxed))
-            + self.experience_points.load(Ordering::Relaxed);
+            .saturating_add(self.experience_points.load(Ordering::Relaxed));
         nbt.put_float("XpP", self.experience_progress.load());
         nbt.put_int("XpLevel", self.experience_level.load(Ordering::Relaxed));
         nbt.put_int("XpTotal", total_exp);
@@ -7364,6 +7455,13 @@ impl Abilities {
             }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeathRespawnPlan {
+    pub spectate: bool,
+    pub world_spawn: bool,
+    pub survival_new_life: bool,
 }
 
 /// Represents the player's stored respawn point (bed/anchor/forced).
@@ -8159,5 +8257,69 @@ mod tests {
             });
         }
         assert_eq!(counter.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn fall_flying_stops_when_landed_or_elytra_removed() {
+        use pumpkin_data::item::Item;
+        use pumpkin_data::item_stack::ItemStack;
+
+        use super::Player;
+
+        let elytra = ItemStack::new(1, &Item::ELYTRA);
+        let chestplate = ItemStack::new(1, &Item::DIAMOND_CHESTPLATE);
+        assert!(Player::stack_is_elytra(&elytra));
+        assert!(!Player::stack_is_elytra(&chestplate));
+        assert!(!Player::stack_is_elytra(ItemStack::EMPTY));
+        assert!(!Player::stack_is_elytra(&ItemStack::new(0, &Item::ELYTRA)));
+
+        assert!(Player::should_keep_fall_flying(false, true));
+        assert!(!Player::should_keep_fall_flying(true, true));
+        assert!(!Player::should_keep_fall_flying(false, false));
+        assert!(!Player::should_keep_fall_flying(true, false));
+    }
+
+    #[test]
+    fn fall_flying_landing_drops_glide_distance_but_walking_fall_remains() {
+        use super::Player;
+
+        assert_eq!(Player::fall_distance_while_fall_flying(true, 80.0), 0.0);
+        assert_eq!(Player::fall_distance_while_fall_flying(false, 80.0), 80.0);
+    }
+
+    #[test]
+    fn hardcore_death_respawn_spectates_at_world_spawn_without_a_new_life() {
+        use super::{DeathRespawnPlan, Player};
+
+        assert_eq!(
+            Player::death_respawn_plan(true, false),
+            DeathRespawnPlan {
+                spectate: true,
+                world_spawn: true,
+                survival_new_life: false,
+            }
+        );
+    }
+
+    #[test]
+    fn ordinary_death_and_alive_respawn_stay_a_survival_life() {
+        use super::{DeathRespawnPlan, Player};
+
+        assert_eq!(
+            Player::death_respawn_plan(false, false),
+            DeathRespawnPlan {
+                spectate: false,
+                world_spawn: false,
+                survival_new_life: true,
+            }
+        );
+        assert_eq!(
+            Player::death_respawn_plan(true, true),
+            DeathRespawnPlan {
+                spectate: false,
+                world_spawn: false,
+                survival_new_life: true,
+            }
+        );
     }
 }

@@ -270,6 +270,35 @@ fn fetch_donators_hover_cached() -> TextComponent {
     donators
 }
 
+fn contributor_hover(names: &str) -> Option<HoverEvent> {
+    let names = names.trim();
+    if names.is_empty() {
+        return None;
+    }
+    Some(HoverEvent::show_text(TextComponent::text(format!(
+        "Commit: {GIT_HASH_FULL}\n\nContributors:\n{names}\n"
+    ))))
+}
+
+struct VersionLine {
+    line: TextComponent,
+    trailing_break: Option<TextComponent>,
+}
+
+fn version_line(version_translation: &str, contributor_names: &str) -> VersionLine {
+    let body = version_translation.trim_end_matches(['\n', '\r']);
+    let trailing = &version_translation[body.len()..];
+    let mut line = TextComponent::text(body.to_owned()).color_named(NamedColor::Green);
+    if let Some(hover) = contributor_hover(contributor_names) {
+        line = line.hover_event(hover);
+    }
+    let trailing_break = (!trailing.is_empty()).then(|| TextComponent::text(trailing.to_owned()));
+    VersionLine {
+        line,
+        trailing_break,
+    }
+}
+
 #[expect(clippy::too_many_lines)]
 impl CommandExecutor for Executor {
     fn execute(&self, context: &CommandContext) -> CommandExecutorResult {
@@ -299,21 +328,17 @@ impl CommandExecutor for Executor {
             locale,
             vec![TextComponent::text(version_string).0],
         );
-        msg = msg.add_child(
-            TextComponent::text(version_translation.clone())
-                .hover_event(HoverEvent::show_text(
-                    TextComponent::text(format!("Commit: {GIT_HASH_FULL}\n\nContributors:\n"))
-                        .add_child(
-                            TextComponent::text(contributor_names)
-                                .gradient_named(&[NamedColor::DarkGreen, NamedColor::Green])
-                                .new_line(),
-                        ),
-                ))
-                .click_event(ClickEvent::CopyToClipboard {
-                    value: Cow::from(version_translation.replace('\n', "")),
-                })
-                .color_named(NamedColor::Green),
-        );
+        let VersionLine {
+            mut line,
+            trailing_break,
+        } = version_line(&version_translation, &contributor_names);
+        line = line.click_event(ClickEvent::CopyToClipboard {
+            value: Cow::from(version_translation.replace('\n', "")),
+        });
+        msg = msg.add_child(line);
+        if let Some(trailing_break) = trailing_break {
+            msg = msg.add_child(trailing_break);
+        }
 
         let desc_translation =
             get_translation_text("pumpkin:commands.pumpkin.description", locale, vec![]);
@@ -468,5 +493,35 @@ mod test {
 
         let cached = fetch_donators_hover_cached();
         assert_eq!(cached, expected);
+    }
+
+    #[test]
+    fn contributor_hover_uses_names_or_is_omitted() {
+        let hover = contributor_hover("alice, bob").expect("names produce a hover");
+        let pumpkin_util::text::hover::HoverEvent::ShowText { value } = hover else {
+            panic!("expected show_text");
+        };
+        let text = value[0]
+            .clone()
+            .get_text(pumpkin_util::translation::Locale::EnUs);
+        assert!(text.contains("alice"), "{text}");
+        assert!(text.contains("bob"), "{text}");
+        assert!(!text.trim().is_empty());
+
+        assert!(contributor_hover("").is_none());
+        assert!(contributor_hover(" \n\t").is_none());
+
+        let with_names = version_line("Pumpkin 1.0\n", "alice");
+        assert!(with_names.line.0.style.hover_event.is_some());
+        let trailing = with_names.trailing_break.expect("newline is separate");
+        assert!(trailing.0.style.hover_event.is_none());
+        assert_eq!(
+            trailing.0.get_text(pumpkin_util::translation::Locale::EnUs),
+            "\n"
+        );
+
+        let without_names = version_line("Pumpkin 1.0\n", "");
+        assert!(without_names.line.0.style.hover_event.is_none());
+        assert!(without_names.trailing_break.is_some());
     }
 }

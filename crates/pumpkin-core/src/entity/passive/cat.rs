@@ -423,12 +423,12 @@ impl Mob for CatEntity {
                 }
                 return parent_interaction;
             }
-        } else if is_food {
+        } else if super::tamable::should_attempt_tame(self.is_tame()) && is_food {
             item_stack.decrement_unless_creative(player.gamemode.load(), 1);
             self.play_eating_sound();
 
             let mut rng = rand::rng();
-            if rng.random_range(0..3) == 0 {
+            if super::tamable::tame_roll_succeeds(rng.random_range(0..3)) {
                 self.set_tame(true, Some(player.gameprofile.id));
                 self.set_sitting(true);
                 self.get_entity().world.load().send_entity_status(

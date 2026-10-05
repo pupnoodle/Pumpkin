@@ -108,10 +108,6 @@ impl BlockEntity for ShulkerBoxBlockEntity {
         self.mark_dirty();
     }
 
-    fn drops_for_creative_player(&self) -> bool {
-        !self.is_empty()
-    }
-
     fn is_comparator_dirty(&self) -> bool {
         self.comparator_dirty.load(Ordering::Relaxed)
     }
@@ -258,6 +254,70 @@ impl Inventory for ShulkerBoxBlockEntity {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::data_component_impl::ContainerImpl;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+    use pumpkin_inventory::Inventory;
+    use pumpkin_util::math::position::BlockPos;
+
+    use crate::block::entities::BlockEntity;
+
+    use super::ShulkerBoxBlockEntity;
+
+    fn filled_box() -> ShulkerBoxBlockEntity {
+        let entity = ShulkerBoxBlockEntity::new(BlockPos::new(1, 2, 3));
+        entity.set_stack(0, ItemStack::new(16, &Item::DIAMOND));
+        entity.set_stack(26, ItemStack::new(1, &Item::STICK));
+        entity
+    }
+
+    fn survival_drop(entity: &ShulkerBoxBlockEntity) -> Vec<ItemStack> {
+        let table = crate::world::loot::get_loot_table("minecraft:blocks/shulker_box")
+            .expect("shulker box loot table");
+        let mut drops = table.generate_loot(1);
+        let block = &pumpkin_data::Block::SHULKER_BOX;
+        for stack in &mut drops {
+            if pumpkin_data::Block::from_item_id(stack.item.id) == Some(block) {
+                entity.collect_item_components(stack);
+            }
+        }
+        drops
+    }
+
+    #[test]
+    fn survival_break_drops_one_box_with_matching_contents() {
+        let entity = filled_box();
+        let drops = survival_drop(&entity);
+        assert_eq!(drops.len(), 1);
+        assert_eq!(drops[0].item.id, Item::SHULKER_BOX.id);
+        assert_eq!(drops[0].item_count, 1);
+        let container = drops[0].get_data_component::<ContainerImpl>().unwrap();
+        assert_eq!(container.items.len(), 2);
+        assert_eq!(container.items[0].0, 0);
+        assert_eq!(container.items[0].1.item.id, Item::DIAMOND.id);
+        assert_eq!(container.items[0].1.item_count, 16);
+        assert_eq!(container.items[1].0, 26);
+        assert_eq!(container.items[1].1.item.id, Item::STICK.id);
+        assert_eq!(container.items[1].1.item_count, 1);
+
+        let restored = ShulkerBoxBlockEntity::new(BlockPos::new(0, 0, 0));
+        restored.apply_item_components(&drops[0]);
+        assert_eq!(restored.get_stack(0).item.id, Item::DIAMOND.id);
+        assert_eq!(restored.get_stack(0).item_count, 16);
+        assert!(restored.get_stack(1).is_empty());
+        assert_eq!(restored.get_stack(26).item.id, Item::STICK.id);
+        assert_eq!(restored.get_stack(26).item_count, 1);
+    }
+
+    #[test]
+    fn creative_break_drops_nothing() {
+        let entity = filled_box();
+        assert!(!entity.drops_for_creative_player());
     }
 }
 

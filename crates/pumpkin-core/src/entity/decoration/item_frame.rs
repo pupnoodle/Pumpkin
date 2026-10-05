@@ -1,10 +1,13 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
+use super::painting::{hanging_space_occupied, hanging_surface_supports};
 use crate::entity::player::Player;
 use crate::entity::{Entity, EntityBase, living::LivingEntity};
+use crate::server::Server;
 use crossbeam::atomic::AtomicCell;
 use pumpkin_data::BlockDirection;
+use pumpkin_data::block_state::BlockState;
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
@@ -13,6 +16,7 @@ use pumpkin_data::sound::Sound;
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_protocol::java::client::play::{CSetEntityMetadata, Metadata};
+use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 
 /// An item frame or glow item frame.
@@ -96,6 +100,40 @@ impl ItemFrameEntity {
         } else {
             Sound::EntityItemFramePlace
         }
+    }
+
+    #[must_use]
+    pub fn calculate_pos(location: BlockPos, face: BlockDirection) -> Vector3<f64> {
+        let target = location.offset(face.to_offset());
+        let step = face.to_offset();
+        Vector3::new(
+            f64::from(target.0.x) + 0.5 - f64::from(step.x) * 0.46875,
+            f64::from(target.0.y) + 0.5 - f64::from(step.y) * 0.46875,
+            f64::from(target.0.z) + 0.5 - f64::from(step.z) * 0.46875,
+        )
+    }
+
+    #[must_use]
+    pub fn blocks_fit(
+        location: BlockPos,
+        face: BlockDirection,
+        state_at: impl Fn(BlockPos) -> &'static BlockState,
+    ) -> bool {
+        let front = location.offset(face.to_offset());
+        hanging_surface_supports(face, state_at(location), state_at(front))
+    }
+
+    #[must_use]
+    pub fn can_place(
+        world: &crate::world::World,
+        location: BlockPos,
+        face: BlockDirection,
+    ) -> bool {
+        if !Self::blocks_fit(location, face, |pos| world.get_block_state(&pos)) {
+            return false;
+        }
+        let front = location.offset(face.to_offset());
+        !hanging_space_occupied(world, &[front], face)
     }
 
     pub fn get_facing(&self) -> BlockDirection {
@@ -243,30 +281,64 @@ impl ItemFrameEntity {
             item_serializer,
         );
 
-        let is_creative_player = caused_by.is_some_and(|s| {
-            s.cast_any()
+        let world = self.entity.world.load();
+        let creative = caused_by.is_some_and(|cause| {
+            cause
+                .cast_any()
                 .downcast_ref::<Player>()
                 .is_some_and(Player::is_creative)
         });
-
-        if is_creative_player {
-            return;
-        }
-
-        let world = self.entity.world.load();
+        let (drop_frame, drop_contents) = frame_break_drops(
+            world.level_info.load().game_rules.entity_drops,
+            creative,
+            if with_frame {
+                FrameHit::Break
+            } else {
+                FrameHit::PopItem
+            },
+            !item_stack.is_empty(),
+        );
         let pos = self.entity.block_pos.load();
-
-        if with_frame {
+        if drop_frame {
             world.drop_stack(&pos, self.get_frame_item_stack_with_data());
         }
-
-        if !item_stack.is_empty() {
-            let drop_chance = self.item_drop_chance.load();
-            if rand::random::<f32>() < drop_chance {
-                world.drop_stack(&pos, item_stack);
-            }
+        if drop_contents && rand::random::<f32>() < self.item_drop_chance.load() {
+            world.drop_stack(&pos, item_stack);
         }
     }
+
+    fn pop_off(&self) {
+        if self.entity.removed.load(Ordering::Relaxed) || self.is_fixed() {
+            return;
+        }
+        let world = self.entity.world.load();
+        let entity_drops = world.level_info.load().game_rules.entity_drops;
+        self.drop_item(None, true);
+        if entity_drops {
+            self.entity.play_sound(self.get_break_sound());
+        }
+        self.entity.remove();
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameHit {
+    PopItem,
+    Break,
+}
+
+#[must_use]
+pub const fn frame_break_drops(
+    entity_drops: bool,
+    creative: bool,
+    hit: FrameHit,
+    has_contents: bool,
+) -> (bool, bool) {
+    let allow = entity_drops && !creative;
+    (
+        allow && matches!(hit, FrameHit::Break),
+        allow && has_contents,
+    )
 }
 
 impl EntityBase for ItemFrameEntity {
@@ -320,6 +392,26 @@ impl EntityBase for ItemFrameEntity {
 
     fn get_living_entity(&self) -> Option<&LivingEntity> {
         None
+    }
+
+    fn tick(&self, caller: &dyn EntityBase, server: &Server) {
+        self.entity.tick(caller, server);
+        if self.entity.removed.load(Ordering::Relaxed) || self.is_fixed() {
+            return;
+        }
+        let world = self.entity.world.load();
+        let front = self.entity.block_pos.load();
+        let face = self.get_facing();
+        let support = front.offset(face.opposite().to_offset());
+        let Some(wall) = world.get_block_state_if_loaded(&support) else {
+            return;
+        };
+        let Some(front_state) = world.get_block_state_if_loaded(&front) else {
+            return;
+        };
+        if !hanging_surface_supports(face, wall, front_state) {
+            self.pop_off();
+        }
     }
 
     fn init_data_tracker(&self) {
@@ -404,42 +496,158 @@ impl EntityBase for ItemFrameEntity {
         damage_type: DamageType,
         _position: Option<Vector3<f64>>,
         source: Option<&dyn EntityBase>,
-        _cause: Option<&dyn EntityBase>,
+        cause: Option<&dyn EntityBase>,
     ) -> bool {
-        let fixed = self.is_fixed();
-        let is_creative_player = source.is_some_and(|s| {
-            s.cast_any()
+        let attacker = source.or(cause);
+        let is_creative_player = attacker.is_some_and(|cause| {
+            cause
+                .cast_any()
                 .downcast_ref::<Player>()
                 .is_some_and(Player::is_creative)
         });
         let bypasses_invuln =
             damage_type == DamageType::OUT_OF_WORLD || damage_type == DamageType::GENERIC_KILL;
 
-        if fixed {
-            if !bypasses_invuln && !is_creative_player {
-                return false;
-            }
-            self.drop_item(source, true);
-            self.entity.remove();
-            return true;
+        if self.is_fixed() && !bypasses_invuln && !is_creative_player {
+            return false;
         }
 
         let has_item = !self.get_item().is_empty();
         let is_explosion =
             damage_type == DamageType::EXPLOSION || damage_type == DamageType::PLAYER_EXPLOSION;
+        let break_frame = self.is_fixed() || is_creative_player || is_explosion || !has_item;
 
-        if !is_explosion && has_item {
-            self.drop_item(source, false);
-            self.entity.play_sound(self.get_remove_item_sound());
-        } else {
-            self.drop_item(source, true);
+        self.drop_item(attacker, break_frame);
+        if break_frame {
             self.entity.play_sound(self.get_break_sound());
             self.entity.remove();
+        } else {
+            self.entity.play_sound(self.get_remove_item_sound());
         }
         true
     }
 
     fn cast_any(&self) -> &dyn std::any::Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FrameHit, ItemFrameEntity, frame_break_drops};
+    use pumpkin_data::BlockDirection;
+    use pumpkin_data::BlockState;
+    use pumpkin_util::math::position::BlockPos;
+    use pumpkin_util::math::vector3::Vector3;
+
+    fn walls(
+        positions: Vec<BlockPos>,
+        wall: &'static BlockState,
+    ) -> impl Fn(BlockPos) -> &'static BlockState {
+        let air = pumpkin_data::Block::AIR.default_state;
+        move |pos| {
+            if positions.contains(&pos) { wall } else { air }
+        }
+    }
+
+    #[test]
+    fn stone_face_with_air_accepts_a_frame_on_every_side() {
+        let location = BlockPos(Vector3::new(4, 64, 8));
+        let at = walls(vec![location], pumpkin_data::Block::STONE.default_state);
+        for face in BlockDirection::all() {
+            assert!(ItemFrameEntity::blocks_fit(location, face, &at), "{face:?}");
+        }
+    }
+
+    #[test]
+    fn frame_rejects_air_a_blocked_front_and_unsturdy_faces() {
+        let location = BlockPos(Vector3::new(4, 64, 8));
+        let air_only = walls(Vec::new(), pumpkin_data::Block::STONE.default_state);
+        assert!(!ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::North,
+            &air_only
+        ));
+
+        let stone = pumpkin_data::Block::STONE.default_state;
+        let blocked = |pos: BlockPos| {
+            if pos == location || pos == location.offset(BlockDirection::Up.to_offset()) {
+                stone
+            } else {
+                pumpkin_data::Block::AIR.default_state
+            }
+        };
+        assert!(!ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::Up,
+            blocked
+        ));
+
+        let slab = walls(vec![location], pumpkin_data::Block::OAK_SLAB.default_state);
+        assert!(!ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::Up,
+            &slab
+        ));
+        assert!(!ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::North,
+            &slab
+        ));
+        assert!(ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::Down,
+            &slab
+        ));
+
+        let snow = walls(vec![location], pumpkin_data::Block::SNOW.default_state);
+        assert!(!ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::Up,
+            &snow
+        ));
+        assert!(!ItemFrameEntity::blocks_fit(
+            location,
+            BlockDirection::South,
+            &snow
+        ));
+    }
+
+    #[test]
+    fn frame_sits_against_the_supporting_face() {
+        let location = BlockPos(Vector3::new(10, 64, 20));
+        let north = ItemFrameEntity::calculate_pos(location, BlockDirection::North);
+        assert_eq!(north.x, 10.5);
+        assert_eq!(north.y, 64.5);
+        assert!((north.z - 19.96875).abs() < 1e-6);
+
+        let up = ItemFrameEntity::calculate_pos(location, BlockDirection::Up);
+        assert_eq!(up.x, 10.5);
+        assert!((up.y - 65.03125).abs() < 1e-6);
+        assert_eq!(up.z, 20.5);
+    }
+
+    #[test]
+    fn survival_break_drops_the_frame_and_contents_separately() {
+        assert_eq!(
+            frame_break_drops(true, false, FrameHit::Break, false),
+            (true, false)
+        );
+        assert_eq!(
+            frame_break_drops(true, false, FrameHit::PopItem, true),
+            (false, true)
+        );
+        assert_eq!(
+            frame_break_drops(true, false, FrameHit::Break, true),
+            (true, true)
+        );
+        assert_eq!(
+            frame_break_drops(true, true, FrameHit::Break, true),
+            (false, false)
+        );
+        assert_eq!(
+            frame_break_drops(false, false, FrameHit::Break, true),
+            (false, false)
+        );
     }
 }

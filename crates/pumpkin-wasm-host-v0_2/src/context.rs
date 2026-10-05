@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use pumpkin_core::plugin::Context;
-use pumpkin_wasm_host_common::state::PluginHostState;
+use pumpkin_wasm_host_common::state::{PluginHostState, WasmCommand};
 
 fn register_typed_event<E: pumpkin_core::plugin::Payload + ToFromWasmEvent + Clone + 'static>(
     ctx: &Context,
@@ -1674,7 +1674,10 @@ impl pumpkin::plugin::context::HostContext for PluginHostState {
     ) -> wasmtime::Result<()> {
         use pumpkin_core::command::argument_builder::ArgumentBuilder;
 
-        let command = self.take(command)?;
+        let command = std::mem::replace(
+            self.get_mut(&command)?,
+            WasmCommand::new(Vec::new(), String::new()),
+        );
         let context = self.get(&context)?.clone();
         let aliases = if command.names.len() > 1 {
             command.names[1..].to_vec()

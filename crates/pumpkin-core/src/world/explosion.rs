@@ -5,6 +5,7 @@ use pumpkin_data::{
     damage::DamageType,
     entity::EntityType,
     fluid::Fluid,
+    sound::Sound,
     tag::{Tag, Taggable},
 };
 use pumpkin_util::math::{boundingbox::BoundingBox, position::BlockPos, vector3::Vector3};
@@ -97,11 +98,7 @@ pub trait ExplosionDamageCalculator: Send + Sync {
             .squared_distance_to_vec(&explosion.pos))
         .sqrt()
             / radius;
-        let damage_multiplier = (1.0 - distance) * exposure as f64;
-        (f64::midpoint(damage_multiplier * damage_multiplier, damage_multiplier)
-            * 7.0
-            * explosion.power as f64
-            + 1.0) as f32
+        Explosion::explosion_damage_at(explosion.power, distance, f64::from(exposure))
     }
 }
 
@@ -190,9 +187,18 @@ pub struct Explosion {
     block_interaction: BlockInteraction,
     damage_calculator: Option<Arc<dyn ExplosionDamageCalculator>>,
     preserve_rails: bool,
+    effect_sound: Option<Sound>,
 }
 
 impl Explosion {
+    pub fn explosion_damage_at(power: f32, distance_fraction: f64, exposure: f64) -> f32 {
+        let damage_multiplier = (1.0 - distance_fraction) * exposure;
+        (f64::midpoint(damage_multiplier * damage_multiplier, damage_multiplier)
+            * 7.0
+            * f64::from(power)
+            + 1.0) as f32
+    }
+
     #[must_use]
     pub const fn new(power: f32, pos: Vector3<f64>, block_interaction: BlockInteraction) -> Self {
         Self {
@@ -201,6 +207,7 @@ impl Explosion {
             block_interaction,
             damage_calculator: None,
             preserve_rails: false,
+            effect_sound: None,
         }
     }
 
@@ -211,6 +218,17 @@ impl Explosion {
     ) -> Self {
         self.damage_calculator = Some(calculator);
         self
+    }
+
+    #[must_use]
+    pub fn with_effect_sound(mut self, sound: Sound) -> Self {
+        self.effect_sound = Some(sound);
+        self
+    }
+
+    #[must_use]
+    pub const fn effect_sound(&self) -> Option<Sound> {
+        self.effect_sound
     }
 
     #[must_use]
@@ -412,7 +430,14 @@ impl Explosion {
             if should_damage {
                 let damage =
                     calc.get_entity_damage_amount(self, entity_base.as_ref(), exposure as f32);
-                entity.damage(entity_base.as_ref(), damage, DamageType::EXPLOSION);
+                entity_base.damage_with_context(
+                    entity_base.as_ref(),
+                    damage,
+                    DamageType::EXPLOSION,
+                    None,
+                    None,
+                    None,
+                );
             }
 
             // Calculate and apply knockback
@@ -503,8 +528,10 @@ impl Explosion {
             BlockInteraction::TriggerBlock => {
                 let blocks = self.get_blocks_to_destroy(world);
                 for (pos, (block, _state)) in &blocks {
-                    let pumpkin_block = world.block_registry.get_pumpkin_block(block.id);
-                    if let Some(pumpkin_block) = pumpkin_block {
+                    world.set_block_state(pos, BlockStateId::AIR, BlockFlags::NOTIFY_ALL);
+                    world.close_container_screens_at(pos);
+
+                    if let Some(pumpkin_block) = world.block_registry.get_pumpkin_block(block.id) {
                         pumpkin_block.explode(ExplodeArgs {
                             world,
                             block,
@@ -512,7 +539,7 @@ impl Explosion {
                         });
                     }
                 }
-                0
+                blocks.len() as u32
             }
             BlockInteraction::Destroy | BlockInteraction::DestroyWithDecay => {
                 let center_pos = BlockPos::floored(self.pos.x, self.pos.y, self.pos.z);

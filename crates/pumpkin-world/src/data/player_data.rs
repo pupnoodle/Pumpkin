@@ -1,9 +1,16 @@
 use pumpkin_nbt::compound::NbtCompound;
-use std::fs::{File, create_dir_all};
+use std::collections::HashMap;
+use std::fs::{self, File};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tracing::{debug, error};
 use uuid::Uuid;
+
+struct PlayerSaveState {
+    next_generation: u64,
+    committed: HashMap<Uuid, u64>,
+}
 
 /// Manages the storage and retrieval of player data from disk and memory cache.
 ///
@@ -14,6 +21,8 @@ pub struct PlayerDataStorage {
     data_path: PathBuf,
     /// Whether player data saving is enabled
     save_enabled: bool,
+    /// Monotonic save generations so an older snapshot cannot replace a newer one.
+    save_state: Mutex<PlayerSaveState>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +38,7 @@ impl PlayerDataStorage {
     pub fn new(data_path: impl Into<PathBuf>, enabled: bool) -> Self {
         let path = data_path.into();
         if !path.exists()
-            && let Err(e) = create_dir_all(&path)
+            && let Err(e) = fs::create_dir_all(&path)
         {
             error!(
                 "Failed to create player data directory at {}: {e}",
@@ -40,7 +49,21 @@ impl PlayerDataStorage {
         Self {
             data_path: path,
             save_enabled: enabled,
+            save_state: Mutex::new(PlayerSaveState {
+                next_generation: 0,
+                committed: HashMap::new(),
+            }),
         }
+    }
+
+    /// Reserves the next save generation. Allocate this when the snapshot is taken.
+    pub fn allocate_save_generation(&self) -> u64 {
+        let mut state = self
+            .save_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.next_generation = state.next_generation.saturating_add(1);
+        state.next_generation
     }
 
     #[must_use]
@@ -122,36 +145,132 @@ impl PlayerDataStorage {
     ///
     /// A Result indicating success or the error that occurred.
     pub fn save_player_data(&self, uuid: &Uuid, data: NbtCompound) -> Result<(), PlayerDataError> {
-        // Skip saving if disabled in config
+        if !self.is_save_enabled() {
+            return Ok(());
+        }
+        let generation = self.allocate_save_generation();
+        self.save_player_data_with_generation(uuid, data, generation)
+    }
+
+    /// Saves player data for a generation allocated when the snapshot was taken.
+    ///
+    /// A generation older than the newest completed save for `uuid` is ignored.
+    pub fn save_player_data_with_generation(
+        &self,
+        uuid: &Uuid,
+        data: NbtCompound,
+        generation: u64,
+    ) -> Result<(), PlayerDataError> {
         if !self.is_save_enabled() {
             return Ok(());
         }
 
-        let path = self.get_player_data_path(uuid);
+        let mut state = self
+            .save_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state
+            .committed
+            .get(uuid)
+            .is_some_and(|committed| *committed > generation)
+        {
+            debug!("Skipping stale player data save for {uuid}");
+            return Ok(());
+        }
 
-        // Ensure parent directory exists
+        let path = self.get_player_data_path(uuid);
         if let Some(parent) = path.parent()
-            && let Err(e) = create_dir_all(parent)
+            && let Err(e) = fs::create_dir_all(parent)
         {
             error!("Failed to create player data directory for {uuid}: {e}");
             return Err(PlayerDataError::Io(e));
         }
 
-        // Create the file and write directly with GZip compression
-        match File::create(&path) {
-            Ok(file) => {
-                if let Err(e) = pumpkin_nbt::nbt_compress::write_gzip_compound_tag(data, file) {
-                    error!("Failed to write compressed player data for {uuid}: {e}");
-                    Err(PlayerDataError::Nbt(e.to_string()))
-                } else {
-                    debug!("Saved player data for {uuid} to disk");
-                    Ok(())
-                }
-            }
-            Err(e) => {
-                error!("Failed to create player data file for {uuid}: {e}");
-                Err(PlayerDataError::Io(e))
-            }
+        if let Err(e) = write_player_data_file(&path, data) {
+            error!("Failed to write player data for {uuid}: {e}");
+            return Err(e);
         }
+
+        state.committed.insert(*uuid, generation);
+        debug!("Saved player data for {uuid} to disk");
+        Ok(())
+    }
+}
+
+fn temporary_player_data_path(path: &Path) -> PathBuf {
+    let mut temp_name = path.as_os_str().to_os_string();
+    temp_name.push(".tmp");
+    PathBuf::from(temp_name)
+}
+
+fn write_player_data_file(path: &Path, data: NbtCompound) -> Result<(), PlayerDataError> {
+    let temp_path = temporary_player_data_path(path);
+    let write_result = (|| -> Result<(), PlayerDataError> {
+        let mut file = File::create(&temp_path)?;
+        pumpkin_nbt::nbt_compress::write_gzip_compound_tag(data, &mut file)
+            .map_err(|e| PlayerDataError::Nbt(e.to_string()))?;
+        file.sync_all()?;
+        fs::rename(&temp_path, path)?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    write_result
+}
+
+#[cfg(test)]
+mod test {
+    use super::{PlayerDataStorage, temporary_player_data_path};
+    use crate::data::player_data::PlayerDataError;
+    use pumpkin_nbt::compound::NbtCompound;
+    use std::fs;
+    use uuid::Uuid;
+
+    fn named(value: &str) -> NbtCompound {
+        let mut nbt = NbtCompound::new();
+        nbt.put_string("name", value.to_string());
+        nbt
+    }
+
+    #[test]
+    fn failed_write_keeps_the_previous_player_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = PlayerDataStorage::new(dir.path(), true);
+        let uuid = Uuid::new_v4();
+        storage.save_player_data(&uuid, named("keep")).unwrap();
+
+        let temp_path = temporary_player_data_path(&storage.get_player_data_path(&uuid));
+        fs::create_dir(&temp_path).unwrap();
+
+        let error = storage.save_player_data(&uuid, named("lose")).unwrap_err();
+        assert!(matches!(error, PlayerDataError::Io(_)));
+
+        let (loaded, nbt) = storage.load_player_data(&uuid).unwrap();
+        assert!(loaded);
+        assert_eq!(nbt.get_string("name").unwrap(), "keep");
+        assert!(storage.get_player_data_path(&uuid).is_file());
+    }
+
+    #[test]
+    fn older_generation_does_not_replace_a_newer_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = PlayerDataStorage::new(dir.path(), true);
+        let uuid = Uuid::new_v4();
+        let older = storage.allocate_save_generation();
+        let newer = storage.allocate_save_generation();
+
+        storage
+            .save_player_data_with_generation(&uuid, named("new"), newer)
+            .unwrap();
+        storage
+            .save_player_data_with_generation(&uuid, named("old"), older)
+            .unwrap();
+
+        let (loaded, nbt) = storage.load_player_data(&uuid).unwrap();
+        assert!(loaded);
+        assert_eq!(nbt.get_string("name").unwrap(), "new");
+        assert!(!temporary_player_data_path(&storage.get_player_data_path(&uuid)).exists());
     }
 }

@@ -203,6 +203,10 @@ pub trait BlockBehaviour: Send + Sync {
         block.rotate(state_id, rotation)
     }
 
+    fn adjust_drops(&self, _state: &BlockState, drops: Vec<ItemStack>) -> Vec<ItemStack> {
+        drops
+    }
+
     fn is_pathfindable(&self, state: &BlockState, computation_type: PathComputationType) -> bool {
         match computation_type {
             PathComputationType::Water => {
@@ -462,7 +466,12 @@ pub fn drop_loot(
     let key = format!("minecraft:blocks/{}", block.name);
     if let Some(loot_table) = world.get_loot_table(&key) {
         let seed: i64 = rand::random();
-        let items = crate::world::loot::generate_loot_from_handle(&loot_table, seed, params);
+        let mut items = crate::world::loot::generate_loot_from_handle(&loot_table, seed, params);
+        if let Some(state) = params.block_state
+            && let Some(behaviour) = world.block_registry.get_pumpkin_block(block.id)
+        {
+            items = behaviour.adjust_drops(state, items);
+        }
         if !items.is_empty() {
             let mut event = crate::plugin::block::block_drop_item::BlockDropItemEvent {
                 block_pos: *pos,

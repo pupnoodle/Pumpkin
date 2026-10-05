@@ -8,6 +8,24 @@ use crate::entity::{mob::Mob, player::Player};
 use pumpkin_protocol::bedrock::server::actor_event::ActorEventID;
 use pumpkin_util::math::vector3::Vector3;
 
+#[must_use]
+pub const fn this_parent_spawns_the_child(self_id: i32, mate_id: i32) -> bool {
+    self_id < mate_id
+}
+
+#[must_use]
+pub const fn can_enter_love(age: i32, breeding_cooldown: i32, in_love: bool) -> bool {
+    age >= 0 && breeding_cooldown <= 0 && !in_love
+}
+
+#[must_use]
+pub const fn age_after_load(saved: Option<i32>, current: i32) -> i32 {
+    match saved {
+        Some(age) => age,
+        None => current,
+    }
+}
+
 pub trait Animal: Mob {
     fn is_food(&self, item_stack: &ItemStack) -> bool;
 
@@ -29,6 +47,12 @@ pub trait Animal: Mob {
 
     fn write_animal_nbt(&self, nbt: &mut pumpkin_nbt::compound::NbtCompound) {
         let mob_entity = self.get_mob_entity();
+        let age = mob_entity
+            .living_entity
+            .entity
+            .age
+            .load(std::sync::atomic::Ordering::Relaxed);
+        nbt.put_int("Age", age);
         let in_love = mob_entity
             .love_ticks
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -40,6 +64,9 @@ pub trait Animal: Mob {
 
     fn read_animal_nbt(&self, nbt: &pumpkin_nbt::compound::NbtCompound) {
         let mob_entity = self.get_mob_entity();
+        let entity = &mob_entity.living_entity.entity;
+        let current = entity.age.load(std::sync::atomic::Ordering::Relaxed);
+        entity.set_age(age_after_load(nbt.get_int("Age"), current));
         let in_love = nbt.get_int("InLove").unwrap_or(0);
         let love_cause = nbt.get_uuid("LoveCause");
         mob_entity.set_love_ticks(in_love, love_cause);
@@ -59,7 +86,10 @@ pub trait Animal: Mob {
                 .age
                 .load(std::sync::atomic::Ordering::Relaxed);
 
-            if age >= 0 && mob_entity.is_breeding_ready() && !mob_entity.is_in_love() {
+            let breeding_cooldown = mob_entity
+                .breeding_cooldown
+                .load(std::sync::atomic::Ordering::Relaxed);
+            if can_enter_love(age, breeding_cooldown, mob_entity.is_in_love()) {
                 item_stack.decrement_unless_creative(player.gamemode.load(), 1);
 
                 mob_entity.set_love_ticks(600, Some(player.gameprofile.id));
@@ -178,5 +208,42 @@ pub fn get_carpet_color_from_item(item: &pumpkin_data::item::Item) -> Option<u8>
         "red_carpet" => Some(14),
         "black_carpet" => Some(15),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{age_after_load, can_enter_love, this_parent_spawns_the_child};
+    use pumpkin_nbt::compound::NbtCompound;
+
+    fn baby_count(parent: i32, mate: i32) -> u8 {
+        u8::from(this_parent_spawns_the_child(parent, mate))
+            + u8::from(this_parent_spawns_the_child(mate, parent))
+    }
+
+    #[test]
+    fn breeding_pair_produces_one_baby() {
+        for (parent, mate) in [(1, 2), (8, 3), (-4, -9), (-2, 7), (i32::MIN, i32::MAX)] {
+            assert_eq!(baby_count(parent, mate), 1, "{parent} x {mate}");
+        }
+    }
+
+    #[test]
+    fn second_feed_during_cooldown_does_not_enter_love() {
+        assert!(can_enter_love(0, 0, false));
+        assert!(!can_enter_love(0, 6000, false));
+        assert!(!can_enter_love(0, 0, true));
+        assert!(!can_enter_love(-24000, 0, false));
+    }
+
+    #[test]
+    fn baby_age_nbt_restores_and_does_not_force_adult() {
+        let mut saved = NbtCompound::new();
+        saved.put_int("Age", -24000);
+        assert_eq!(age_after_load(saved.get_int("Age"), 0), -24000);
+
+        let missing = NbtCompound::new();
+        assert_eq!(age_after_load(missing.get_int("Age"), -24000), -24000);
+        assert_eq!(age_after_load(missing.get_int("Age"), 0), 0);
     }
 }

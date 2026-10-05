@@ -9,6 +9,7 @@ use crate::{
     },
 };
 use pumpkin_core::net::ClientPlatform;
+use pumpkin_protocol::ConnectionState;
 use pumpkin_core::plugin::server::{
     list_ping::ServerListPingEvent,
     map_initialize::MapInitializeEvent,
@@ -34,6 +35,7 @@ impl ToFromWasmEvent for PacketReceivedEvent {
                 self.packet_id,
                 &self.payload,
                 pumpkin_data::packet::CURRENT_MC_VERSION,
+                ConnectionState::Play,
             )
             .map_or(ServerboundPacket::Unknown, ServerboundPacket::Java),
             ClientPlatform::Bedrock(_) => {

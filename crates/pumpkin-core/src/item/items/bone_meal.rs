@@ -8,6 +8,7 @@ use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::world::WorldEvent;
 use pumpkin_data::{Block, BlockDirection};
+use pumpkin_util::GameMode;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 
@@ -33,12 +34,13 @@ impl ItemBehaviour for BoneMealItem {
     ) -> BlockActionResult {
         let world = player.world();
         let state_id = world.get_block_state_id(&location);
-        if server
+        let applied = server
             .block_registry
-            .bone_meal(block, &world, &location, state_id)
-        {
+            .bone_meal(block, &world, &location, state_id);
+        if applied {
             world.sync_world_event(WorldEvent::ParticlesAndSoundPlantGrowth, location, 15);
-            item.decrement_unless_creative(player.gamemode.load(), 1);
+        }
+        if spend_bone_meal(applied, player.gamemode.load(), item) {
             BlockActionResult::Success
         } else {
             BlockActionResult::Pass
@@ -47,5 +49,31 @@ impl ItemBehaviour for BoneMealItem {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+fn spend_bone_meal(applied: bool, gamemode: GameMode, item: &mut ItemStack) -> bool {
+    if applied {
+        item.decrement_unless_creative(gamemode, 1);
+    }
+    applied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn survival_bone_meal_is_spent_only_when_the_crop_accepts_it() {
+        let mut stack = ItemStack::new(4, &Item::BONE_MEAL);
+        assert!(!spend_bone_meal(false, GameMode::Survival, &mut stack));
+        assert_eq!(stack.item_count, 4);
+
+        assert!(spend_bone_meal(true, GameMode::Survival, &mut stack));
+        assert_eq!(stack.item_count, 3);
+
+        let mut creative = ItemStack::new(4, &Item::BONE_MEAL);
+        assert!(spend_bone_meal(true, GameMode::Creative, &mut creative));
+        assert_eq!(creative.item_count, 4);
     }
 }

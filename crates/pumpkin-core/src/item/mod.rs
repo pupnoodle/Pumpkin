@@ -13,6 +13,8 @@ use pumpkin_data::Block;
 use pumpkin_data::BlockDirection;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
+use pumpkin_inventory::player::player_inventory::PlayerInventory;
+use pumpkin_util::GameMode;
 use pumpkin_util::Hand;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
@@ -99,4 +101,121 @@ pub trait ItemBehaviour: Send + Sync {
     }
 
     fn as_any(&self) -> &dyn Any;
+}
+
+pub(crate) fn slot_index_for_hand(hand: Hand, selected_hotbar: u8) -> usize {
+    match hand {
+        Hand::Right => selected_hotbar as usize,
+        Hand::Left => PlayerInventory::OFF_HAND_SLOT,
+    }
+}
+
+pub(crate) fn decrement_placed_stack(gamemode: GameMode, stack: &mut ItemStack) {
+    if gamemode != GameMode::Creative {
+        stack.decrement(1);
+    }
+}
+
+pub(crate) fn stored_stack_after_use(
+    before: &ItemStack,
+    mut after: ItemStack,
+) -> Option<ItemStack> {
+    if after.is_empty() {
+        after.clear();
+    }
+    if after.are_equal(before) {
+        None
+    } else {
+        Some(after)
+    }
+}
+
+pub(crate) fn store_used_hand(
+    inventory: &PlayerInventory,
+    hand: Hand,
+    before: &ItemStack,
+    after: ItemStack,
+) -> Option<ItemStack> {
+    let updated = stored_stack_after_use(before, after)?;
+    inventory.set_stack_in_hand(hand, updated.clone());
+    Some(updated)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pumpkin_data::item::Item;
+    use pumpkin_inventory::build_equipment_slots;
+    use pumpkin_inventory::entity_equipment::EntityEquipment;
+    use std::sync::{Arc, Mutex};
+
+    fn inventory() -> PlayerInventory {
+        PlayerInventory::new(
+            Arc::new(Mutex::new(EntityEquipment::new())),
+            Arc::new(build_equipment_slots()),
+        )
+    }
+
+    fn place_from_main_hand(item: &'static Item, count: u8) -> PlayerInventory {
+        let inventory = inventory();
+        inventory.set_held_item(ItemStack::new(count, item));
+        let hand = match Hand::from_packet_id(0) {
+            Ok(hand) => hand,
+            Err(_) => panic!("packet hand 0 is the main hand"),
+        };
+        let mut stack = inventory.get_stack_in_hand(hand);
+        let before = stack.clone();
+        decrement_placed_stack(GameMode::Survival, &mut stack);
+        let slot = slot_index_for_hand(hand, inventory.get_selected_slot());
+        assert_ne!(slot, PlayerInventory::OFF_HAND_SLOT);
+        store_used_hand(&inventory, hand, &before, stack);
+        inventory
+    }
+
+    #[test]
+    fn survival_place_decrements_the_held_stack_only() {
+        for item in [&Item::OAK_LOG, &Item::SWEET_BERRIES, &Item::GLOW_BERRIES] {
+            let inventory = place_from_main_hand(item, 2);
+            let held = inventory.held_item();
+            assert_eq!(held.item.id, item.id);
+            assert_eq!(held.item_count, 1);
+            assert!(inventory.off_hand_item().is_empty());
+        }
+    }
+
+    #[test]
+    fn creative_place_does_not_consume_or_copy_the_stack() {
+        let inventory = inventory();
+        inventory.set_held_item(ItemStack::new(4, &Item::OAK_LOG));
+        let hand = match Hand::from_packet_id(0) {
+            Ok(hand) => hand,
+            Err(_) => panic!("packet hand 0 is the main hand"),
+        };
+        let mut stack = inventory.get_stack_in_hand(hand);
+        let before = stack.clone();
+        decrement_placed_stack(GameMode::Creative, &mut stack);
+        assert!(store_used_hand(&inventory, hand, &before, stack).is_none());
+        assert_eq!(inventory.held_item().item_count, 4);
+        assert!(inventory.off_hand_item().is_empty());
+    }
+
+    #[test]
+    fn offhand_place_does_not_change_the_main_hand() {
+        let inventory = inventory();
+        inventory.set_held_item(ItemStack::new(5, &Item::DIRT));
+        inventory.set_stack_in_hand(Hand::Left, ItemStack::new(3, &Item::OAK_LOG));
+        let hand = match Hand::from_packet_id(1) {
+            Ok(hand) => hand,
+            Err(_) => panic!("packet hand 1 is the off hand"),
+        };
+        assert!(matches!(hand, Hand::Left));
+        let mut stack = inventory.get_stack_in_hand(hand);
+        let before = stack.clone();
+        decrement_placed_stack(GameMode::Survival, &mut stack);
+        store_used_hand(&inventory, hand, &before, stack);
+        assert_eq!(inventory.held_item().item_count, 5);
+        assert_eq!(inventory.held_item().item.id, Item::DIRT.id);
+        assert_eq!(inventory.off_hand_item().item_count, 2);
+        assert_eq!(inventory.off_hand_item().item.id, Item::OAK_LOG.id);
+    }
 }

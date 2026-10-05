@@ -44,12 +44,6 @@ impl ItemBehaviour for HangingEntityItem {
         _server: &Server,
     ) -> BlockActionResult {
         let world = player.world();
-        let target_pos = location.offset(face.to_offset());
-        let pos = Vector3::new(
-            f64::from(target_pos.0.x) + 0.5,
-            f64::from(target_pos.0.y) + 0.5,
-            f64::from(target_pos.0.z) + 0.5,
-        );
 
         if item.item.id == Item::PAINTING.id {
             if face == BlockDirection::Up || face == BlockDirection::Down {
@@ -89,6 +83,8 @@ impl ItemBehaviour for HangingEntityItem {
                 &spawn_pos,
             );
             world.spawn_entity(painting);
+        } else if !ItemFrameEntity::can_place(&world, location, face) {
+            return BlockActionResult::Fail;
         } else {
             let entity_type = if item.item.id == Item::GLOW_ITEM_FRAME.id {
                 &EntityType::GLOW_ITEM_FRAME
@@ -96,6 +92,7 @@ impl ItemBehaviour for HangingEntityItem {
                 &EntityType::ITEM_FRAME
             };
 
+            let pos = ItemFrameEntity::calculate_pos(location, face);
             let entity = Entity::new(world.clone(), pos, entity_type);
             let frame = ItemFrameEntity::new(entity);
             frame.set_facing(face);

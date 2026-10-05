@@ -567,6 +567,13 @@ fn extract_entries_with_depth(
 
             for child in &entry.children {
                 let child_cond = condition_of(child.condition.as_ref());
+                if child.condition.is_some()
+                    && child_cond == LootCondition::None
+                    && !saw_silk
+                    && !saw_shears
+                {
+                    continue;
+                }
 
                 let effective_cond = if child_cond == LootCondition::SilkTouch {
                     saw_silk = true;

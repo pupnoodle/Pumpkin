@@ -67,6 +67,15 @@ impl BreedGoal {
     fn breed(mob: &dyn Mob, mate: &dyn EntityBase) {
         let mob_entity = mob.get_mob_entity();
         let entity = mob.get_entity();
+        if !crate::entity::passive::animal::this_parent_spawns_the_child(
+            entity.entity_id,
+            mate.get_entity().entity_id,
+        ) {
+            return;
+        }
+        if !mob_entity.is_in_love() || !mob_entity.is_breeding_ready() {
+            return;
+        }
         let world = entity.world.load();
 
         let player_opt = mob_entity

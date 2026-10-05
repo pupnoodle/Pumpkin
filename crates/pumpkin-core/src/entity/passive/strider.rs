@@ -130,6 +130,10 @@ impl Mob for StriderEntity {
         Some(self)
     }
 
+    fn is_sensitive_to_water(&self) -> bool {
+        true
+    }
+
     fn is_saddled(&self) -> bool {
         self.saddled.load(Ordering::Relaxed)
     }

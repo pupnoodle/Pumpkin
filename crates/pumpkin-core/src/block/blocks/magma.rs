@@ -12,6 +12,12 @@ pub struct MagmaBlock;
 
 impl BlockBehaviour for MagmaBlock {
     fn on_entity_step(&self, args: OnEntityStepArgs<'_>) {
+        // Only the block the entity stands on damages; a block stacked above
+        // the magma block shields it, like vanilla's entityInside collision check.
+        if args.below_supporting_block {
+            return;
+        }
+
         {
             // Only living entities take damage
             let Some(living_entity) = args.entity.get_living_entity() else {

@@ -1,8 +1,13 @@
+use pumpkin_data::Block;
 use pumpkin_data::BlockState;
+use pumpkin_data::block_properties::BlockProperties;
 use pumpkin_data::damage::DamageType;
+use pumpkin_data::data_component_impl::EnchantmentsImpl;
 use pumpkin_data::entity::EntityType;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
+use pumpkin_data::recipes::{CookingRecipeKind, RecipeCategoryTypes};
+use pumpkin_data::tag::Taggable;
 pub use pumpkin_util::loot_table::{
     DynamicLootCondition, DynamicLootEntry, DynamicLootPool, DynamicLootTable, LootBonusFormula,
     LootCondition, LootEntry, LootPool, LootTable,
@@ -94,6 +99,17 @@ fn check_dynamic_condition(
             }
             true
         }
+        DynamicLootCondition::MatchBlockState { block, properties } => {
+            params.block_state.is_some_and(|state| {
+                matches_block_state(
+                    block,
+                    state,
+                    properties
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str())),
+                )
+            })
+        }
     }
 }
 
@@ -136,6 +152,15 @@ fn check_condition(
                 .get(index)
                 .is_some_and(|chance| rng.next_f32() < *chance)
         }
+        LootCondition::MatchBlockState { block, properties } => {
+            params.block_state.is_some_and(|state| {
+                matches_block_state(
+                    block,
+                    state,
+                    properties.iter().map(|(key, value)| (*key, *value)),
+                )
+            })
+        }
         LootCondition::AllOf(conditions) => conditions
             .iter()
             .all(|c| check_condition(*c, has_silk_touch, has_shears, fortune_level, params, rng)),
@@ -177,6 +202,25 @@ fn apply_bonus_formula(
             base_count + bonus_count
         }
     }
+}
+
+fn matches_block_state<'a>(
+    block: &str,
+    state: &BlockState,
+    mut properties: impl Iterator<Item = (&'a str, &'a str)>,
+) -> bool {
+    let owner = Block::from_state_id(state.id);
+    if owner.name != block {
+        return false;
+    }
+    owner.properties(state.id).is_some_and(|props| {
+        let state_props = props.to_props();
+        properties.all(|(key, value)| {
+            state_props
+                .iter()
+                .any(|(state_key, state_value)| *state_key == key && *state_value == value)
+        })
+    })
 }
 
 #[must_use]
@@ -594,5 +638,120 @@ fn shuffle_and_split_items(
     for i in (1..n).rev() {
         let j = rng.next_bounded_i32((i + 1) as i32) as usize;
         result.swap(i, j);
+    }
+}
+
+pub fn apply_furnace_smelt_to_drop(stack: ItemStack, params: &LootContextParameters) -> ItemStack {
+    if stack.is_empty() || !entity_drop_should_smelt(params) {
+        return stack;
+    }
+    smelt_food_stack(stack)
+}
+
+fn entity_drop_should_smelt(params: &LootContextParameters) -> bool {
+    params.is_on_fire.unwrap_or(false) || tool_smelts_loot(params.tool.as_ref())
+}
+
+fn tool_smelts_loot(tool: Option<&ItemStack>) -> bool {
+    let Some(tool) = tool else {
+        return false;
+    };
+    let Some(enchants) = tool.get_data_component::<EnchantmentsImpl>() else {
+        return false;
+    };
+    enchants.enchantment.iter().any(|(enchantment, level)| {
+        *level > 0 && enchantment.has_tag(&pumpkin_data::tag::Enchantment::MINECRAFT_SMELTS_LOOT)
+    })
+}
+
+fn smelt_food_stack(mut stack: ItemStack) -> ItemStack {
+    let Some(recipe) = pumpkin_data::recipes::get_cooking_recipe_with_ingredient(
+        stack.item,
+        CookingRecipeKind::Smelting,
+    ) else {
+        return stack;
+    };
+    if !matches!(&recipe.category, RecipeCategoryTypes::Food) {
+        return stack;
+    }
+    let Some(cooked) = Item::from_registry_key(recipe.result.id) else {
+        return stack;
+    };
+    stack.item = cooked;
+    stack
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pumpkin_data::Enchantment;
+
+    fn params(on_fire: bool, tool: Option<ItemStack>) -> LootContextParameters {
+        LootContextParameters {
+            is_on_fire: Some(on_fire),
+            tool,
+            ..Default::default()
+        }
+    }
+
+    fn fire_aspect_sword() -> ItemStack {
+        let mut sword = ItemStack::new(1, &Item::DIAMOND_SWORD);
+        sword.add_enchantment(&Enchantment::FIRE_ASPECT, 1);
+        sword
+    }
+
+    #[test]
+    fn fire_aspect_cooks_meat_even_when_the_mob_is_not_burning() {
+        let cooked = apply_furnace_smelt_to_drop(
+            ItemStack::new(2, &Item::BEEF),
+            &params(false, Some(fire_aspect_sword())),
+        );
+        assert_eq!(cooked.item, &Item::COOKED_BEEF);
+        assert_eq!(cooked.item_count, 2);
+
+        let pork = apply_furnace_smelt_to_drop(
+            ItemStack::new(1, &Item::PORKCHOP),
+            &params(false, Some(fire_aspect_sword())),
+        );
+        assert_eq!(pork.item, &Item::COOKED_PORKCHOP);
+    }
+
+    #[test]
+    fn burning_mob_drops_cooked_meat() {
+        let cooked =
+            apply_furnace_smelt_to_drop(ItemStack::new(1, &Item::CHICKEN), &params(true, None));
+        assert_eq!(cooked.item, &Item::COOKED_CHICKEN);
+
+        let potato =
+            apply_furnace_smelt_to_drop(ItemStack::new(1, &Item::POTATO), &params(true, None));
+        assert_eq!(potato.item, &Item::BAKED_POTATO);
+    }
+
+    #[test]
+    fn unburned_kill_without_fire_aspect_stays_raw() {
+        let mut sword = ItemStack::new(1, &Item::DIAMOND_SWORD);
+        sword.add_enchantment(&Enchantment::SHARPNESS, 5);
+        let raw = apply_furnace_smelt_to_drop(
+            ItemStack::new(3, &Item::MUTTON),
+            &params(false, Some(sword)),
+        );
+        assert_eq!(raw.item, &Item::MUTTON);
+        assert_eq!(raw.item_count, 3);
+
+        let raw = apply_furnace_smelt_to_drop(ItemStack::new(1, &Item::COD), &params(false, None));
+        assert_eq!(raw.item, &Item::COD);
+    }
+
+    #[test]
+    fn burning_does_not_cook_drops_without_a_food_smelt() {
+        let ingot = apply_furnace_smelt_to_drop(
+            ItemStack::new(1, &Item::IRON_INGOT),
+            &params(true, Some(fire_aspect_sword())),
+        );
+        assert_eq!(ingot.item, &Item::IRON_INGOT);
+
+        let feather =
+            apply_furnace_smelt_to_drop(ItemStack::new(1, &Item::FEATHER), &params(true, None));
+        assert_eq!(feather.item, &Item::FEATHER);
     }
 }

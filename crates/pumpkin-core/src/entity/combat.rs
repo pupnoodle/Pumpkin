@@ -67,6 +67,17 @@ pub fn knockback_after_resistance(strength: f64, resistance: f64) -> f64 {
     strength * (1.0 - resistance)
 }
 
+pub fn shield_blocks_facing(
+    defender_pos: Vector3<f64>,
+    defender_yaw: f32,
+    source_pos: Vector3<f64>,
+) -> bool {
+    let look_vec = Vector3::rotation_vector(0.0, f64::from(defender_yaw));
+    let mut source_to_defender = (defender_pos - source_pos).normalize();
+    source_to_defender.y = 0.0;
+    source_to_defender.dot(&look_vec) < 0.0
+}
+
 pub fn handle_knockback(attacker: &Entity, victim: &dyn EntityBase, strength: f64) {
     let resistance = victim.get_living_entity().map_or(0.0, |living| {
         living.get_attribute_value(&Attributes::KNOCKBACK_RESISTANCE)

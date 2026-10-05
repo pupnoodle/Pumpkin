@@ -107,16 +107,45 @@ const fn to_wasm_java_version(
     version: JavaMinecraftVersion,
 ) -> pumpkin::plugin::player::JavaMinecraftVersion {
     match version {
-        JavaMinecraftVersion::V_1_7_2 => pumpkin::plugin::player::JavaMinecraftVersion::V172,
-        JavaMinecraftVersion::V_1_7_6 => pumpkin::plugin::player::JavaMinecraftVersion::V176,
-        JavaMinecraftVersion::V_1_8 => pumpkin::plugin::player::JavaMinecraftVersion::V18,
+        JavaMinecraftVersion::V_1_0
+        | JavaMinecraftVersion::V_1_1
+        | JavaMinecraftVersion::V_1_2_5
+        | JavaMinecraftVersion::V_1_3_2
+        | JavaMinecraftVersion::V_1_4_7
+        | JavaMinecraftVersion::V_1_5_2
+        | JavaMinecraftVersion::V_1_6_4 => pumpkin::plugin::player::JavaMinecraftVersion::Unknown,
+        JavaMinecraftVersion::V_1_7_2
+        | JavaMinecraftVersion::V_1_7_3
+        | JavaMinecraftVersion::V_1_7_4
+        | JavaMinecraftVersion::V_1_7_5 => pumpkin::plugin::player::JavaMinecraftVersion::V172,
+        JavaMinecraftVersion::V_1_7_6
+        | JavaMinecraftVersion::V_1_7_7
+        | JavaMinecraftVersion::V_1_7_8
+        | JavaMinecraftVersion::V_1_7_9
+        | JavaMinecraftVersion::V_1_7_10 => pumpkin::plugin::player::JavaMinecraftVersion::V176,
+        JavaMinecraftVersion::V_1_8
+        | JavaMinecraftVersion::V_1_8_1
+        | JavaMinecraftVersion::V_1_8_2
+        | JavaMinecraftVersion::V_1_8_3
+        | JavaMinecraftVersion::V_1_8_4
+        | JavaMinecraftVersion::V_1_8_5
+        | JavaMinecraftVersion::V_1_8_6
+        | JavaMinecraftVersion::V_1_8_7
+        | JavaMinecraftVersion::V_1_8_8
+        | JavaMinecraftVersion::V_1_8_9 => pumpkin::plugin::player::JavaMinecraftVersion::V18,
         JavaMinecraftVersion::V_1_9 => pumpkin::plugin::player::JavaMinecraftVersion::V19,
         JavaMinecraftVersion::V_1_9_1 => pumpkin::plugin::player::JavaMinecraftVersion::V191,
         JavaMinecraftVersion::V_1_9_2 => pumpkin::plugin::player::JavaMinecraftVersion::V192,
-        JavaMinecraftVersion::V_1_9_3 => pumpkin::plugin::player::JavaMinecraftVersion::V193,
-        JavaMinecraftVersion::V_1_10 => pumpkin::plugin::player::JavaMinecraftVersion::V110,
+        JavaMinecraftVersion::V_1_9_3 | JavaMinecraftVersion::V_1_9_4 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V193
+        }
+        JavaMinecraftVersion::V_1_10
+        | JavaMinecraftVersion::V_1_10_1
+        | JavaMinecraftVersion::V_1_10_2 => pumpkin::plugin::player::JavaMinecraftVersion::V110,
         JavaMinecraftVersion::V_1_11 => pumpkin::plugin::player::JavaMinecraftVersion::V111,
-        JavaMinecraftVersion::V_1_11_1 => pumpkin::plugin::player::JavaMinecraftVersion::V1111,
+        JavaMinecraftVersion::V_1_11_1 | JavaMinecraftVersion::V_1_11_2 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1111
+        }
         JavaMinecraftVersion::V_1_12 => pumpkin::plugin::player::JavaMinecraftVersion::V112,
         JavaMinecraftVersion::V_1_12_1 => pumpkin::plugin::player::JavaMinecraftVersion::V1121,
         JavaMinecraftVersion::V_1_12_2 => pumpkin::plugin::player::JavaMinecraftVersion::V1122,
@@ -135,28 +164,50 @@ const fn to_wasm_java_version(
         JavaMinecraftVersion::V_1_16_1 => pumpkin::plugin::player::JavaMinecraftVersion::V1161,
         JavaMinecraftVersion::V_1_16_2 => pumpkin::plugin::player::JavaMinecraftVersion::V1162,
         JavaMinecraftVersion::V_1_16_3 => pumpkin::plugin::player::JavaMinecraftVersion::V1163,
-        JavaMinecraftVersion::V_1_16_4 => pumpkin::plugin::player::JavaMinecraftVersion::V1164,
+        JavaMinecraftVersion::V_1_16_4 | JavaMinecraftVersion::V_1_16_5 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1164
+        }
         JavaMinecraftVersion::V_1_17 => pumpkin::plugin::player::JavaMinecraftVersion::V117,
         JavaMinecraftVersion::V_1_17_1 => pumpkin::plugin::player::JavaMinecraftVersion::V1171,
-        JavaMinecraftVersion::V_1_18 => pumpkin::plugin::player::JavaMinecraftVersion::V118,
+        JavaMinecraftVersion::V_1_18 | JavaMinecraftVersion::V_1_18_1 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V118
+        }
         JavaMinecraftVersion::V_1_18_2 => pumpkin::plugin::player::JavaMinecraftVersion::V1182,
         JavaMinecraftVersion::V_1_19 => pumpkin::plugin::player::JavaMinecraftVersion::V119,
-        JavaMinecraftVersion::V_1_19_1 => pumpkin::plugin::player::JavaMinecraftVersion::V1191,
+        JavaMinecraftVersion::V_1_19_1 | JavaMinecraftVersion::V_1_19_2 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1191
+        }
         JavaMinecraftVersion::V_1_19_3 => pumpkin::plugin::player::JavaMinecraftVersion::V1193,
         JavaMinecraftVersion::V_1_19_4 => pumpkin::plugin::player::JavaMinecraftVersion::V1194,
-        JavaMinecraftVersion::V_1_20 => pumpkin::plugin::player::JavaMinecraftVersion::V120,
+        JavaMinecraftVersion::V_1_20 | JavaMinecraftVersion::V_1_20_1 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V120
+        }
         JavaMinecraftVersion::V_1_20_2 => pumpkin::plugin::player::JavaMinecraftVersion::V1202,
-        JavaMinecraftVersion::V_1_20_3 => pumpkin::plugin::player::JavaMinecraftVersion::V1203,
-        JavaMinecraftVersion::V_1_20_5 => pumpkin::plugin::player::JavaMinecraftVersion::V1205,
-        JavaMinecraftVersion::V_1_21 => pumpkin::plugin::player::JavaMinecraftVersion::V121,
-        JavaMinecraftVersion::V_1_21_2 => pumpkin::plugin::player::JavaMinecraftVersion::V1212,
+        JavaMinecraftVersion::V_1_20_3 | JavaMinecraftVersion::V_1_20_4 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1203
+        }
+        JavaMinecraftVersion::V_1_20_5 | JavaMinecraftVersion::V_1_20_6 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1205
+        }
+        JavaMinecraftVersion::V_1_21 | JavaMinecraftVersion::V_1_21_1 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V121
+        }
+        JavaMinecraftVersion::V_1_21_2 | JavaMinecraftVersion::V_1_21_3 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1212
+        }
         JavaMinecraftVersion::V_1_21_4 => pumpkin::plugin::player::JavaMinecraftVersion::V1214,
         JavaMinecraftVersion::V_1_21_5 => pumpkin::plugin::player::JavaMinecraftVersion::V1215,
         JavaMinecraftVersion::V_1_21_6 => pumpkin::plugin::player::JavaMinecraftVersion::V1216,
-        JavaMinecraftVersion::V_1_21_7 => pumpkin::plugin::player::JavaMinecraftVersion::V1217,
-        JavaMinecraftVersion::V_1_21_9 => pumpkin::plugin::player::JavaMinecraftVersion::V1219,
+        JavaMinecraftVersion::V_1_21_7 | JavaMinecraftVersion::V_1_21_8 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1217
+        }
+        JavaMinecraftVersion::V_1_21_9 | JavaMinecraftVersion::V_1_21_10 => {
+            pumpkin::plugin::player::JavaMinecraftVersion::V1219
+        }
         JavaMinecraftVersion::V_1_21_11 => pumpkin::plugin::player::JavaMinecraftVersion::V12111,
-        JavaMinecraftVersion::V_26_1 => pumpkin::plugin::player::JavaMinecraftVersion::V261,
+        JavaMinecraftVersion::V_26_1
+        | JavaMinecraftVersion::V_26_1_1
+        | JavaMinecraftVersion::V_26_1_2 => pumpkin::plugin::player::JavaMinecraftVersion::V261,
         JavaMinecraftVersion::V_26_2 => pumpkin::plugin::player::JavaMinecraftVersion::V262,
         JavaMinecraftVersion::V_26_3 => pumpkin::plugin::player::JavaMinecraftVersion::V263,
         JavaMinecraftVersion::Unknown => pumpkin::plugin::player::JavaMinecraftVersion::Unknown,

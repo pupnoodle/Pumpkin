@@ -314,9 +314,9 @@ impl Mob for NautilusEntity {
         let mob_entity = &self.mob_entity;
         let entity = &mob_entity.living_entity.entity;
 
-        if !self.is_tame() && self.is_food(item_stack) {
+        if super::tamable::should_attempt_tame(self.is_tame()) && self.is_food(item_stack) {
             item_stack.decrement_unless_creative(player.gamemode.load(), 1);
-            if rand::random::<u32>().is_multiple_of(3) {
+            if super::tamable::tame_roll_succeeds(rand::random::<u32>()) {
                 self.set_tame(true, Some(player.gameprofile.id));
                 let world = entity.world.load();
                 world.send_entity_status(entity, EntityStatus::TamingSucceeded, None);

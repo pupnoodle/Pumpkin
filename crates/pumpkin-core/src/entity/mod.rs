@@ -58,7 +58,7 @@ use pumpkin_util::math::{
 use pumpkin_util::text::TextComponent;
 use pumpkin_util::text::hover::HoverEvent;
 use pumpkin_util::version::JavaMinecraftVersion;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{
     Arc,
     atomic::{
@@ -100,6 +100,7 @@ pub mod vehicle;
 pub use lightning::LightningBoltEntity;
 
 pub(crate) mod combat;
+pub use combat::shield_blocks_facing;
 pub mod predicate;
 
 /// The maximum number of scoreboard tags an entity can carry, matching Vanilla.
@@ -1715,7 +1716,9 @@ impl Entity {
 
     fn update_fluid_state(&self, caller: &dyn EntityBase) {
         let is_pushed = caller.is_pushed_by_fluids();
-        let mut fluids = BTreeMap::new();
+        // Distinct fluids in the entity's box, only allocated when
+        // the entity is actually in a fluid.
+        let mut fluids: Vec<&'static Fluid> = Vec::new();
 
         let water_push = Vector3::default();
 
@@ -1766,7 +1769,9 @@ impl Entity {
                             in_fluid[i] = true;
 
                             if !is_pushed {
-                                fluids.insert(fluid.id, fluid);
+                                if !fluids.iter().any(|known| known.id == fluid.id) {
+                                    fluids.push(fluid);
+                                }
 
                                 continue;
                             }
@@ -1781,16 +1786,20 @@ impl Entity {
 
                             fluid_n[i] += 1;
 
-                            fluids.insert(fluid.id, fluid);
+                            if !fluids.iter().any(|known| known.id == fluid.id) {
+                                fluids.push(fluid);
+                            }
                         }
                     }
                 }
             }
         }
 
-        // BTreeMap auto-sorts water before lava as in vanilla
+        // Sort by fluid id to match vanilla's water-before-lava order
 
-        for (_, fluid) in fluids {
+        fluids.sort_by_key(|fluid| fluid.id);
+
+        for fluid in fluids {
             world
                 .block_registry
                 .on_entity_collision_fluid(fluid, caller);
@@ -2901,21 +2910,19 @@ impl Entity {
 
         let java_recipients = self.java_metadata_recipients(&world, &players);
 
-        let recipients_by_version =
-            World::collect_java_recipients_by_version(java_recipients.into_iter());
+        let recipients = World::collect_java_recipients(java_recipients.into_iter());
 
-        for (version, recipients) in recipients_by_version {
-            let mut buf = Vec::new();
-            for m in meta {
-                let _ = m.write(&mut buf, &version);
-            }
-            if buf.is_empty() {
-                continue;
-            }
+        let mut buf = Vec::new();
+        for m in meta {
+            let _ = m.write(&mut buf, &CURRENT_MC_VERSION);
+        }
+        if !buf.is_empty() {
             buf.put_u8(255);
             let packet = CSetEntityMetadata::new(self.entity_id.into(), buf.into());
-            if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version) {
-                for recipient in recipients {
+            if let Ok(packet_data) =
+                JavaClient::serialize_packet_for_version(&packet, CURRENT_MC_VERSION)
+            {
+                for recipient in &recipients {
                     recipient.try_enqueue_packet(packet_data.clone());
                 }
             }
@@ -2955,17 +2962,18 @@ impl Entity {
             return;
         }
 
-        let recipients_by_version =
-            World::collect_java_recipients_by_version(java_recipients.into_iter());
+        let recipients = World::collect_java_recipients(java_recipients.into_iter());
 
-        for (version, recipients) in recipients_by_version {
-            if let Some(buf) = self.synched_data.pack_dirty_for_version(&version) {
-                let packet = CSetEntityMetadata::new(self.entity_id.into(), buf);
-                if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version)
-                {
-                    for recipient in recipients {
-                        recipient.try_enqueue_packet(packet_data.clone());
-                    }
+        if let Some(buf) = self
+            .synched_data
+            .pack_dirty_for_version(&CURRENT_MC_VERSION)
+        {
+            let packet = CSetEntityMetadata::new(self.entity_id.into(), buf);
+            if let Ok(packet_data) =
+                JavaClient::serialize_packet_for_version(&packet, CURRENT_MC_VERSION)
+            {
+                for recipient in &recipients {
+                    recipient.try_enqueue_packet(packet_data.clone());
                 }
             }
         }
@@ -2989,20 +2997,18 @@ impl Entity {
             return;
         }
 
-        let recipients_by_version =
-            World::collect_java_recipients_by_version(java_recipients.into_iter());
+        let recipients = World::collect_java_recipients(java_recipients.into_iter());
 
-        for (version, recipients) in recipients_by_version {
-            if let Some(buf) = self
-                .synched_data
-                .get_non_default_values_for_version(&version)
+        if let Some(buf) = self
+            .synched_data
+            .get_non_default_values_for_version(&CURRENT_MC_VERSION)
+        {
+            let packet = CSetEntityMetadata::new(self.entity_id.into(), buf);
+            if let Ok(packet_data) =
+                JavaClient::serialize_packet_for_version(&packet, CURRENT_MC_VERSION)
             {
-                let packet = CSetEntityMetadata::new(self.entity_id.into(), buf);
-                if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version)
-                {
-                    for recipient in recipients {
-                        recipient.try_enqueue_packet(packet_data.clone());
-                    }
+                for recipient in &recipients {
+                    recipient.try_enqueue_packet(packet_data.clone());
                 }
             }
         }

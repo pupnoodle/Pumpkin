@@ -628,9 +628,8 @@ impl TrackedEntity {
                 ClientPlatform::Bedrock(be_client) => bedrock_recipients.push(be_client),
             }
         }
-        let recipients_by_version =
-            World::collect_java_recipients_by_version(java_recipients.into_iter());
-        World::broadcast_java_grouped(&je_packet, recipients_by_version);
+        let recipients = World::collect_java_recipients(java_recipients.into_iter());
+        World::broadcast_java_grouped(&je_packet, &recipients);
         World::broadcast_bedrock_grouped(&be_packet, bedrock_recipients.into_iter());
 
         self.seen_by.clear();
@@ -664,8 +663,8 @@ impl TrackedEntity {
         let recipients = players
             .iter()
             .filter(|p| self.seen_by.contains(&p.gameprofile.id));
-        let recipients_by_version = World::collect_java_recipients_by_version(recipients);
-        World::broadcast_java_grouped(packet, recipients_by_version);
+        let recipients = World::collect_java_recipients(recipients);
+        World::broadcast_java_grouped(packet, &recipients);
     }
 
     pub fn send_to_tracking_players_bedrock<P: BClientPacket + Sync>(
@@ -710,9 +709,8 @@ impl TrackedEntity {
                 ClientPlatform::Bedrock(be_client) => bedrock_recipients.push(be_client),
             }
         }
-        let recipients_by_version =
-            World::collect_java_recipients_by_version(java_recipients.into_iter());
-        World::broadcast_java_grouped(je_packet, recipients_by_version);
+        let recipients = World::collect_java_recipients(java_recipients.into_iter());
+        World::broadcast_java_grouped(je_packet, &recipients);
         World::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 
@@ -752,8 +750,8 @@ impl TrackedEntity {
         let recipients = players
             .iter()
             .filter(|p| self.seen_by.contains(&p.gameprofile.id) && filter(p));
-        let recipients_by_version = World::collect_java_recipients_by_version(recipients);
-        World::broadcast_java_grouped(packet, recipients_by_version);
+        let recipients = World::collect_java_recipients(recipients);
+        World::broadcast_java_grouped(packet, &recipients);
     }
 
     pub fn send_to_tracking_players_filtered_editioned<
@@ -780,9 +778,8 @@ impl TrackedEntity {
                 ClientPlatform::Bedrock(be_client) => bedrock_recipients.push(be_client),
             }
         }
-        let recipients_by_version =
-            World::collect_java_recipients_by_version(java_recipients.into_iter());
-        World::broadcast_java_grouped(je_packet, recipients_by_version);
+        let recipients = World::collect_java_recipients(java_recipients.into_iter());
+        World::broadcast_java_grouped(je_packet, &recipients);
         World::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 }
@@ -972,20 +969,19 @@ impl EntityTracker {
                 }
                 tracked.last_section_pos.store(new_pos);
             }
+            // Change packets go out in the same pass as the move
+            // scan: an entity's changes only depend on its own
+            // tracking state, so this needs no separate iteration.
+            if tracked.entity.get_player().is_none() {
+                tracked.send_changes(world);
+            } else if tracked.entity.get_entity().synched_data.is_dirty() {
+                tracked.entity.get_entity().send_dirty_entity_data();
+            }
         }
 
         if !moved_players.is_empty() {
             for entry in &self.entity_map {
                 entry.value().update_players(&moved_players, world);
-            }
-        }
-
-        for entry in &self.entity_map {
-            let tracked = entry.value();
-            if tracked.entity.get_player().is_none() {
-                tracked.send_changes(world);
-            } else if tracked.entity.get_entity().synched_data.is_dirty() {
-                tracked.entity.get_entity().send_dirty_entity_data();
             }
         }
     }

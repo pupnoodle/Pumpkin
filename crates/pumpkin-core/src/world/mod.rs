@@ -14,10 +14,7 @@ use pumpkin_world::generation::proto_chunk::GenerationCache;
 use rayon::prelude::*;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, RwLock, Weak};
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::atomic::Ordering,
-};
+use std::{collections::HashMap, sync::atomic::Ordering};
 use tracing::{debug, error, info, trace, warn};
 
 mod active_chunks;
@@ -957,64 +954,49 @@ impl World {
         }
     }
 
-    /// Keyed by encode version: always `CURRENT_MC_VERSION`, older clients are converted
+    /// Collects the Java clients to broadcast to. Every client
+    /// encodes at `CURRENT_MC_VERSION`; older clients are converted
     /// per connection on enqueue by the multiversion plugin.
-    // TODO: collapse to a plain recipient list with a single serialize.
-    pub(crate) fn collect_java_recipients_by_version<'a>(
+    pub(crate) fn collect_java_recipients<'a>(
         players: impl Iterator<Item = &'a Arc<Player>>,
-    ) -> BTreeMap<JavaMinecraftVersion, Vec<&'a JavaClient>> {
-        let mut recipients_by_version: BTreeMap<JavaMinecraftVersion, Vec<&'a JavaClient>> =
-            BTreeMap::new();
-        for player in players {
-            if let ClientPlatform::Java(java_client) = player.client.as_ref() {
-                recipients_by_version
-                    .entry(CURRENT_MC_VERSION)
-                    .or_default()
-                    .push(java_client);
-            }
-        }
-        recipients_by_version
+    ) -> Vec<&'a JavaClient> {
+        players
+            .filter_map(|player| match player.client.as_ref() {
+                ClientPlatform::Java(java_client) => Some(java_client),
+                ClientPlatform::Bedrock(_) => None,
+            })
+            .collect()
     }
 
     pub fn broadcast_java_clients<'a, P: ClientPacket>(
         packet: &P,
         recipients: impl Iterator<Item = &'a JavaClient>,
     ) {
-        let mut recipients_by_version: BTreeMap<JavaMinecraftVersion, Vec<&JavaClient>> =
-            BTreeMap::new();
-        for client in recipients {
-            recipients_by_version
-                .entry(CURRENT_MC_VERSION)
-                .or_default()
-                .push(client);
-        }
-        Self::broadcast_java_grouped(packet, recipients_by_version);
+        let recipients: Vec<&JavaClient> = recipients.collect();
+        Self::broadcast_java_grouped(packet, &recipients);
     }
 
-    fn broadcast_java_grouped<P: ClientPacket>(
-        packet: &P,
-        recipients_by_version: BTreeMap<JavaMinecraftVersion, Vec<&JavaClient>>,
-    ) {
-        for (version, recipients) in recipients_by_version {
-            let packet_data = match JavaClient::serialize_packet_for_version(packet, version) {
-                Ok(packet_data) => packet_data,
-                Err(pumpkin_protocol::ser::WritingError::UnsupportedVersion(_)) => {
-                    continue;
-                }
-                Err(err) => {
-                    error!(
-                        "Failed to serialize packet {} for version {:?}: {}",
-                        std::any::type_name::<P>(),
-                        version,
-                        err
-                    );
-                    continue;
-                }
-            };
-
-            for recipient in recipients {
-                recipient.try_enqueue_packet(packet_data.clone());
+    fn broadcast_java_grouped<P: ClientPacket>(packet: &P, recipients: &[&JavaClient]) {
+        if recipients.is_empty() {
+            return;
+        }
+        let packet_data = match JavaClient::serialize_packet_for_version(packet, CURRENT_MC_VERSION)
+        {
+            Ok(packet_data) => packet_data,
+            Err(pumpkin_protocol::ser::WritingError::UnsupportedVersion(_)) => return,
+            Err(err) => {
+                error!(
+                    "Failed to serialize packet {} for version {:?}: {}",
+                    std::any::type_name::<P>(),
+                    CURRENT_MC_VERSION,
+                    err
+                );
+                return;
             }
+        };
+
+        for recipient in recipients {
+            recipient.try_enqueue_packet(packet_data.clone());
         }
     }
 
@@ -1044,8 +1026,8 @@ impl World {
     /// **Note:** This function acquires a lock on the `current_players` map, ensuring thread safety.
     pub fn broadcast_packet_all<P: ClientPacket>(&self, packet: &P) {
         let players = self.players.load();
-        let recipients_by_version = Self::collect_java_recipients_by_version(players.iter());
-        Self::broadcast_java_grouped(packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(players.iter());
+        Self::broadcast_java_grouped(packet, &recipients);
     }
 
     pub fn broadcast_system_message(&self, message: &TextComponent, overlay: bool) {
@@ -1097,9 +1079,9 @@ impl World {
         be_packet: &B,
     ) {
         let players = self.players.load();
-        let je_recipients_by_version = Self::collect_java_recipients_by_version(players.iter());
+        let je_recipients = Self::collect_java_recipients(players.iter());
 
-        Self::broadcast_java_grouped(je_packet, je_recipients_by_version);
+        Self::broadcast_java_grouped(je_packet, &je_recipients);
         Self::broadcast_bedrock_grouped(
             be_packet,
             players.iter().filter_map(|p| match p.client.as_ref() {
@@ -1211,9 +1193,8 @@ impl World {
             }
         }
 
-        let recipients_by_version =
-            Self::collect_java_recipients_by_version(java_recipients.into_iter());
-        Self::broadcast_java_grouped(je_packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(java_recipients.into_iter());
+        Self::broadcast_java_grouped(je_packet, &recipients);
         Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 
@@ -1240,29 +1221,28 @@ impl World {
             }
         }
 
-        let recipients_by_version =
-            Self::collect_java_recipients_by_version(java_recipients.into_iter());
+        let recipients = Self::collect_java_recipients(java_recipients.into_iter());
 
-        for (version, recipients) in recipients_by_version {
-            let mut buf = Vec::new();
-            for meta in [
-                Metadata::new(
-                    pumpkin_data::tracked_data::player::PLAYER_MODE_CUSTOMISATION,
-                    skin_parts,
-                ),
-                Metadata::new(
-                    pumpkin_data::tracked_data::player::PLAYER_MODE_CUSTOMIZATION_ID,
-                    skin_parts,
-                ),
-            ] {
-                let _ = meta.write(&mut buf, &version);
-            }
-            buf.put_u8(255);
-            let packet = CSetEntityMetadata::new(entity_id.into(), buf.into());
-            if let Ok(packet_data) = JavaClient::serialize_packet_for_version(&packet, version) {
-                for recipient in recipients {
-                    recipient.try_enqueue_packet(packet_data.clone());
-                }
+        let mut buf = Vec::new();
+        for meta in [
+            Metadata::new(
+                pumpkin_data::tracked_data::player::PLAYER_MODE_CUSTOMISATION,
+                skin_parts,
+            ),
+            Metadata::new(
+                pumpkin_data::tracked_data::player::PLAYER_MODE_CUSTOMIZATION_ID,
+                skin_parts,
+            ),
+        ] {
+            let _ = meta.write(&mut buf, &CURRENT_MC_VERSION);
+        }
+        buf.put_u8(255);
+        let packet = CSetEntityMetadata::new(entity_id.into(), buf.into());
+        if let Ok(packet_data) =
+            JavaClient::serialize_packet_for_version(&packet, CURRENT_MC_VERSION)
+        {
+            for recipient in &recipients {
+                recipient.try_enqueue_packet(packet_data.clone());
             }
         }
 
@@ -1276,12 +1256,12 @@ impl World {
     /// **Note:** This function acquires a lock on the `current_players` map, ensuring thread safety.
     pub fn broadcast_packet_except<P: ClientPacket>(&self, except: &[uuid::Uuid], packet: &P) {
         let players = self.players.load();
-        let recipients_by_version = Self::collect_java_recipients_by_version(
+        let recipients = Self::collect_java_recipients(
             players
                 .iter()
                 .filter(|candidate| !except.contains(&candidate.gameprofile.id)),
         );
-        Self::broadcast_java_grouped(packet, recipients_by_version);
+        Self::broadcast_java_grouped(packet, &recipients);
     }
 
     pub fn spawn_particle(
@@ -1460,8 +1440,8 @@ impl World {
             is_within_chebyshev_distance(chunk_pos, center, audible_chunks)
         });
 
-        let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
-        Self::broadcast_java_grouped(&packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(recipients);
+        Self::broadcast_java_grouped(&packet, &recipients);
     }
 
     pub fn play_sound_raw_expect(
@@ -1490,8 +1470,8 @@ impl World {
             is_within_chebyshev_distance(chunk_pos, center, audible_chunks)
         });
 
-        let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
-        Self::broadcast_java_grouped(&packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(recipients);
+        Self::broadcast_java_grouped(&packet, &recipients);
     }
 
     pub fn play_block_sound(&self, sound: Sound, category: SoundCategory, position: BlockPos) {
@@ -1815,12 +1795,8 @@ impl World {
                     }
                 }
 
-                let recipients_by_version =
-                    Self::collect_java_recipients_by_version(java_recipients.into_iter());
-                Self::broadcast_java_grouped(
-                    &CMultiBlockUpdate::new(&updates),
-                    recipients_by_version,
-                );
+                let recipients = Self::collect_java_recipients(java_recipients.into_iter());
+                Self::broadcast_java_grouped(&CMultiBlockUpdate::new(&updates), &recipients);
 
                 for (block_pos, _) in &updates {
                     if let Some(block_entity) = self.get_block_entity(block_pos)
@@ -3768,7 +3744,7 @@ impl World {
         power: f32,
         interaction: ExplosionInteraction,
     ) {
-        self.explode_with_calculator(position, power, interaction, None);
+        self.explode_with_calculator(position, power, interaction, None, None);
     }
 
     pub fn explode_with_calculator(
@@ -3777,11 +3753,15 @@ impl World {
         power: f32,
         interaction: ExplosionInteraction,
         damage_calculator: Option<Arc<dyn ExplosionDamageCalculator>>,
+        effect_sound: Option<Sound>,
     ) {
         let block_interaction = self.get_block_interaction(interaction);
         let mut explosion = Explosion::new(power, position, block_interaction);
         if let Some(calc) = damage_calculator {
             explosion = explosion.with_damage_calculator(calc);
+        }
+        if let Some(sound) = effect_sound {
+            explosion = explosion.with_effect_sound(sound);
         }
         self.run_explosion(&explosion, position, power);
     }
@@ -3840,7 +3820,10 @@ impl World {
         } else {
             Particle::ExplosionEmitter
         };
-        let sound = IdOr::<SoundEvent>::Id(Sound::EntityGenericExplode as u16);
+        let sound = match explosion.effect_sound() {
+            Some(sound) => IdOr::<SoundEvent>::Id(sound as u16),
+            None => IdOr::<SoundEvent>::Id(Sound::EntityGenericExplode as u16),
+        };
         for player in self.players.load().iter() {
             if player.position().squared_distance_to_vec(&position) > 4096.0 {
                 continue;
@@ -3921,9 +3904,17 @@ impl World {
             )
         };
 
+        let hardcore = server.as_ref().is_some_and(|s| s.basic_config.hardcore);
+        let dead =
+            player.living_entity.dead.load(Relaxed) || player.living_entity.health.load() <= 0.0;
+        let plan = Player::death_respawn_plan(hardcore && dead, alive);
+        if plan.spectate {
+            player.enter_hardcore_spectator();
+        }
+
         // Get respawn position and dimension
-        let (position, yaw, pitch, respawn_dimension) = if let Some(respawn) =
-            player.calculate_respawn_point().await
+        let (position, yaw, pitch, respawn_dimension) = if !plan.world_spawn
+            && let Some(respawn) = player.calculate_respawn_point().await
         {
             (
                 respawn.position,
@@ -3933,11 +3924,12 @@ impl World {
             )
         } else {
             // No valid respawn point - send notification if player had one set
-            if player
-                .respawn_point
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_some()
+            if !plan.world_spawn
+                && player
+                    .respawn_point
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some()
             {
                 player
                     .send_client_packet(&CGameEvent::new(GameEvent::NoRespawnBlockAvailable, 0.0))
@@ -4142,15 +4134,26 @@ impl World {
             )
             .await;
 
-        player.living_entity.reset_state();
+        if plan.survival_new_life {
+            player.living_entity.reset_state();
 
-        player.send_permission_lvl_update();
+            player.send_permission_lvl_update();
 
-        player.hunger_manager.restart();
+            player.hunger_manager.restart();
 
-        if !keep_inventory {
-            player.set_experience(0, 0.0, 0);
-            player.inventory.clear();
+            if !keep_inventory {
+                player.set_experience(0, 0.0, 0);
+                player.inventory.clear();
+            }
+        } else {
+            player.get_entity().reset_state();
+            player.living_entity.dead.store(false, Relaxed);
+            player.living_entity.death_time.store(0, Relaxed);
+            player.living_entity.fall_distance.store(0.0);
+            player
+                .living_entity
+                .set_health(player.living_entity.get_max_health());
+            player.send_permission_lvl_update();
         }
 
         // Set entity position BEFORE loading chunks, so chunks load at the right location
@@ -4277,6 +4280,7 @@ impl World {
                             .unwrap_or_else(std::sync::PoisonError::into_inner),
                     );
                     chunk.live.store(true, Relaxed);
+                    let mut loaded_entities: Vec<Arc<dyn EntityBase>> = Vec::new();
                     for entity_nbt in &entity_nbts {
                         let Some(id) = entity_nbt.get_string("id") else {
                             debug!("Entity has no ID");
@@ -4305,10 +4309,14 @@ impl World {
                         // stale data.
                         base_entity.velocity.store(Vector3::default());
 
-                        // UUID-dedupes if another watcher already loaded this entity.
-                        // Tracker owns pairing (spawn packets + vehicle restore).
-                        world.add_entity_silent(entity.clone());
-                        player.try_restore_vehicle(&entity);
+                        loaded_entities.push(entity);
+                    }
+                    // UUID-dedupes if another watcher already loaded an
+                    // entity. Tracker owns pairing (spawn packets + vehicle
+                    // restore).
+                    world.add_entities_silent_batch(&loaded_entities);
+                    for entity in &loaded_entities {
+                        player.try_restore_vehicle(entity);
                     }
                 } else {
                     // Already live for other watchers: pair this player now so
@@ -4374,6 +4382,25 @@ impl World {
             )
             .filter(|entity| entity.get_entity().bounding_box.load().intersects(aabb))
             .collect()
+    }
+
+    /// Calls `f` for every entity and player whose bounding box
+    /// intersects `aabb`, without cloning the entity lists. The live
+    /// lists are pinned for the duration of the call, so `f` must not
+    /// spawn or remove entities.
+    pub fn for_each_at_box(&self, aabb: &BoundingBox, mut f: impl FnMut(&dyn EntityBase)) {
+        let entities_guard = self.entities.load();
+        let players_guard = self.players.load();
+        for entity in entities_guard.iter() {
+            if entity.get_entity().bounding_box.load().intersects(aabb) {
+                f(entity.as_ref());
+            }
+        }
+        for player in players_guard.iter() {
+            if player.get_entity().bounding_box.load().intersects(aabb) {
+                f(player.as_ref());
+            }
+        }
     }
 
     // Gets all non Player entities at a Box
@@ -4919,6 +4946,47 @@ impl World {
         self.add_pending_riders(&entity);
     }
 
+    /// Adds several entities with a single entity-list update.
+    ///
+    /// Chunk loading calls this once per chunk instead of once per
+    /// entity: the entity list is copy-on-write, so updating it per
+    /// entity makes loading an entity-heavy chunk quadratic.
+    pub fn add_entities_silent_batch(&self, entities: &[Arc<dyn EntityBase>]) {
+        if entities.is_empty() {
+            return;
+        }
+
+        // Same UUID dedup as `add_entity_silent`.
+        let existing_uuids: FxHashSet<Uuid> = self
+            .entities
+            .load()
+            .iter()
+            .map(|entity| entity.get_entity().entity_uuid)
+            .collect();
+        let fresh: Vec<_> = entities
+            .iter()
+            .filter(|entity| !existing_uuids.contains(&entity.get_entity().entity_uuid))
+            .collect();
+        if fresh.is_empty() {
+            return;
+        }
+
+        for entity in &fresh {
+            self.spawn_state.load().add_entity(self, entity.as_ref());
+            self.entity_tracker.add_entity(entity, self);
+        }
+        self.entities.rcu(|current_entities| {
+            let mut new_entities = (**current_entities).clone();
+            for entity in &fresh {
+                new_entities.push((*entity).clone());
+            }
+            new_entities
+        });
+        for entity in &fresh {
+            self.add_pending_riders(entity);
+        }
+    }
+
     pub fn remove_entity(&self, entity: &dyn EntityBase) {
         let base_entity = entity.get_entity();
         if base_entity
@@ -5170,7 +5238,7 @@ impl World {
                 }
             }
 
-            if !flags.contains(BlockFlags::MOVED) {
+            if !flags.intersects(BlockFlags::MOVED | BlockFlags::UPDATE_KNOWN_SHAPE) {
                 let mut neighbour_update_flags = flags;
                 neighbour_update_flags.remove(BlockFlags::NOTIFY_NEIGHBORS);
                 neighbour_update_flags.remove(BlockFlags::SKIP_REDSTONE_WIRE_STATE_REPLACEMENT);
@@ -6821,8 +6889,8 @@ impl World {
                 .is_within_distance(chunk_pos.x, chunk_pos.y)
         });
 
-        let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
-        Self::broadcast_java_grouped(packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(recipients);
+        Self::broadcast_java_grouped(packet, &recipients);
     }
 
     pub fn broadcast_to_chunk_bedrock<P: BClientPacket>(
@@ -6868,9 +6936,8 @@ impl World {
             }
         }
 
-        let recipients_by_version =
-            Self::collect_java_recipients_by_version(java_recipients.into_iter());
-        Self::broadcast_java_grouped(je_packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(java_recipients.into_iter());
+        Self::broadcast_java_grouped(je_packet, &recipients);
         Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 
@@ -6892,8 +6959,8 @@ impl World {
                 .is_within_distance(chunk_pos.x, chunk_pos.y)
         });
 
-        let recipients_by_version = Self::collect_java_recipients_by_version(recipients);
-        Self::broadcast_java_grouped(packet, recipients_by_version);
+        let recipients = Self::collect_java_recipients(recipients);
+        Self::broadcast_java_grouped(packet, &recipients);
     }
 
     pub fn broadcast_to_chunk_except_editioned<J: ClientPacket, B: BClientPacket>(
@@ -6923,9 +6990,8 @@ impl World {
             }
         }
 
-        let je_recipients_by_version =
-            Self::collect_java_recipients_by_version(java_recipients.into_iter());
-        Self::broadcast_java_grouped(je_packet, je_recipients_by_version);
+        let je_recipients = Self::collect_java_recipients(java_recipients.into_iter());
+        Self::broadcast_java_grouped(je_packet, &je_recipients);
         Self::broadcast_bedrock_grouped(be_packet, bedrock_recipients.into_iter());
     }
 

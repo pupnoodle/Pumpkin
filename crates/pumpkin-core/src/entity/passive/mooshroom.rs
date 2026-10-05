@@ -12,6 +12,7 @@ use pumpkin_data::sound::{Sound, SoundCategory};
 use pumpkin_data::tag::{self, Taggable};
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_protocol::codec::var_int::VarInt;
+use pumpkin_util::Hand;
 use pumpkin_util::math::vector3::Vector3;
 use uuid::Uuid;
 
@@ -243,6 +244,7 @@ impl Mob for MooshroomEntity {
             );
 
             player.damage_held_item(1);
+            player.swing_hand(Hand::Right, true);
             return true;
         }
 

@@ -1,17 +1,20 @@
 use core::f32;
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use super::item_frame::ItemFrameEntity;
 use crate::entity::player::Player;
 use crate::entity::{Entity, EntityBase, living::LivingEntity};
-use pumpkin_data::BlockDirection;
+use pumpkin_data::block_state::BlockState;
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
 use pumpkin_data::painting_variant::PaintingVariant;
 use pumpkin_data::sound::{Sound, SoundCategory};
+use pumpkin_data::{Block, BlockDirection};
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_protocol::codec::var_int::VarInt;
 use pumpkin_protocol::java::client::play::Metadata;
+use pumpkin_util::math::boundingbox::BoundingBox;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
 use pumpkin_util::version::JavaMinecraftVersion;
@@ -115,8 +118,8 @@ impl PaintingEntity {
         Vector3::new(x, y, z)
     }
 
-    /// Checks if a painting of the specified variant fits on the wall at `location` facing `face`.
-    /// The wall blocks behind the painting must be solid, and the blocks in front must not be solid.
+    /// A painting fits when every block it covers has a sturdy face (or a repeater or
+    /// comparator, on a side) and air in front, and nothing else already hangs there.
     #[must_use]
     pub fn painting_fits(
         world: &crate::world::World,
@@ -124,15 +127,46 @@ impl PaintingEntity {
         face: BlockDirection,
         variant: PaintingVariant,
     ) -> bool {
-        let width = variant.width();
-        let height = variant.height();
+        if !Self::painting_blocks_fit(location, face, variant.width(), variant.height(), |pos| {
+            world.get_block_state(&pos)
+        }) {
+            return false;
+        }
+        let fronts = Self::front_blocks(location, face, variant.width(), variant.height());
+        !hanging_space_occupied(world, &fronts, face)
+    }
+
+    #[must_use]
+    pub fn painting_blocks_fit(
+        location: BlockPos,
+        face: BlockDirection,
+        width: u32,
+        height: u32,
+        state_at: impl Fn(BlockPos) -> &'static BlockState,
+    ) -> bool {
+        if !face.is_horizontal() || width == 0 || height == 0 {
+            return false;
+        }
+        for (wall_pos, front_pos) in Self::covered_cells(location, face, width, height) {
+            if !hanging_surface_supports(face, state_at(wall_pos), state_at(front_pos)) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn covered_cells(
+        location: BlockPos,
+        face: BlockDirection,
+        width: u32,
+        height: u32,
+    ) -> Vec<(BlockPos, BlockPos)> {
         let face_ccw = face.rotate_counter_clockwise();
         let ccw_offset = face_ccw.to_offset();
         let face_offset = face.to_offset();
-
         let k = -((width as i32 - 1) / 2);
         let l = -((height as i32 - 1) / 2);
-
+        let mut cells = Vec::with_capacity((width * height) as usize);
         for x_idx in 0..width {
             for y_idx in 0..height {
                 let wall_pos = BlockPos(Vector3::new(
@@ -141,19 +175,49 @@ impl PaintingEntity {
                     location.0.z + ccw_offset.z * (x_idx as i32 + k),
                 ));
                 let front_pos = wall_pos.offset(face_offset);
-
-                let wall_state = world.get_block_state(&wall_pos);
-                if !wall_state.is_solid() {
-                    return false;
-                }
-
-                let front_state = world.get_block_state(&front_pos);
-                if front_state.is_solid() {
-                    return false;
-                }
+                cells.push((wall_pos, front_pos));
             }
         }
-        true
+        cells
+    }
+
+    fn front_blocks(
+        location: BlockPos,
+        face: BlockDirection,
+        width: u32,
+        height: u32,
+    ) -> Vec<BlockPos> {
+        Self::covered_cells(location, face, width, height)
+            .into_iter()
+            .map(|(_, front)| front)
+            .collect()
+    }
+
+    #[must_use]
+    pub fn anchor_from_center(
+        center: Vector3<f64>,
+        face: BlockDirection,
+        width: u32,
+        height: u32,
+    ) -> Option<BlockPos> {
+        if !face.is_horizontal() {
+            return None;
+        }
+        let step = face.to_offset();
+        let ccw = face.rotate_counter_clockwise().to_offset();
+        let width_offset = if width.is_multiple_of(2) { 0.5 } else { 0.0 };
+        let height_offset = if height.is_multiple_of(2) { 0.5 } else { 0.0 };
+        let target_x = (center.x - 0.5 + f64::from(step.x) * 0.46875
+            - width_offset * f64::from(ccw.x))
+        .round() as i32;
+        let target_y = (center.y - 0.5 - height_offset).round() as i32;
+        let target_z = (center.z - 0.5 + f64::from(step.z) * 0.46875
+            - width_offset * f64::from(ccw.z))
+        .round() as i32;
+        Some(
+            BlockPos(Vector3::new(target_x, target_y, target_z))
+                .offset(face.opposite().to_offset()),
+        )
     }
 
     /// Chooses a placeable painting variant that fits the wall at `location` facing `face`.
@@ -190,24 +254,125 @@ impl PaintingEntity {
     fn drop_and_remove(&self, caused_by: Option<&dyn EntityBase>) {
         let entity = &self.entity;
         let world = entity.world.load();
-        world.play_sound(
-            Sound::EntityPaintingBreak,
-            SoundCategory::Blocks,
-            &entity.pos.load(),
-        );
-
-        let is_creative = caused_by.is_some_and(|c| {
-            c.cast_any()
-                .downcast_ref::<Player>()
-                .is_some_and(Player::is_creative)
-        });
-
-        if !is_creative {
+        let entity_drops = world.level_info.load().game_rules.entity_drops;
+        let creative = attacker_is_creative(caused_by);
+        if entity_drops {
+            world.play_sound(
+                Sound::EntityPaintingBreak,
+                SoundCategory::Blocks,
+                &entity.pos.load(),
+            );
+        }
+        if painting_should_drop(entity_drops, creative) {
             world.drop_stack(&entity.block_pos.load(), ItemStack::new(1, &Item::PAINTING));
         }
-
         entity.remove();
     }
+}
+
+#[must_use]
+pub const fn painting_should_drop(entity_drops: bool, creative_attacker: bool) -> bool {
+    entity_drops && !creative_attacker
+}
+
+#[must_use]
+pub fn hanging_surface_supports(
+    face: BlockDirection,
+    wall: &BlockState,
+    front: &BlockState,
+) -> bool {
+    if !front.is_air() {
+        return false;
+    }
+    if wall.is_side_solid(face) {
+        return true;
+    }
+    face.is_horizontal() && is_redstone_diode(wall)
+}
+
+fn is_redstone_diode(state: &BlockState) -> bool {
+    let block = Block::from_state_id(state.id);
+    block == &Block::REPEATER || block == &Block::COMPARATOR
+}
+
+fn attacker_is_creative(caused_by: Option<&dyn EntityBase>) -> bool {
+    caused_by.is_some_and(|cause| {
+        cause
+            .cast_any()
+            .downcast_ref::<Player>()
+            .is_some_and(Player::is_creative)
+    })
+}
+
+pub(crate) fn hanging_space_occupied(
+    world: &crate::world::World,
+    fronts: &[BlockPos],
+    face: BlockDirection,
+) -> bool {
+    let Some(first) = fronts.first() else {
+        return false;
+    };
+    let mut min_x = first.0.x;
+    let mut min_y = first.0.y;
+    let mut min_z = first.0.z;
+    let mut max_x = first.0.x;
+    let mut max_y = first.0.y;
+    let mut max_z = first.0.z;
+    for pos in fronts.iter().skip(1) {
+        min_x = min_x.min(pos.0.x);
+        min_y = min_y.min(pos.0.y);
+        min_z = min_z.min(pos.0.z);
+        max_x = max_x.max(pos.0.x);
+        max_y = max_y.max(pos.0.y);
+        max_z = max_z.max(pos.0.z);
+    }
+    let bounds = BoundingBox {
+        min: Vector3::new(f64::from(min_x), f64::from(min_y), f64::from(min_z)),
+        max: Vector3::new(
+            f64::from(max_x) + 1.0,
+            f64::from(max_y) + 1.0,
+            f64::from(max_z) + 1.0,
+        ),
+    }
+    .expand(4.0, 4.0, 4.0);
+
+    for entity in world.get_entities_at_box(&bounds) {
+        if entity.get_entity().removed.load(Ordering::Relaxed) {
+            continue;
+        }
+        if let Some(frame) = entity.cast_any().downcast_ref::<ItemFrameEntity>() {
+            if frame.get_facing() == face && fronts.contains(&frame.get_entity().block_pos.load()) {
+                return true;
+            }
+            continue;
+        }
+        let Some(painting) = entity.cast_any().downcast_ref::<PaintingEntity>() else {
+            continue;
+        };
+        let Some(facing) =
+            BlockDirection::from_index(painting.get_entity().data.load(Ordering::Relaxed) as u8)
+        else {
+            continue;
+        };
+        if facing != face {
+            continue;
+        }
+        let variant = painting.variant();
+        let Some(anchor) = PaintingEntity::anchor_from_center(
+            painting.get_entity().pos.load(),
+            facing,
+            variant.width(),
+            variant.height(),
+        ) else {
+            continue;
+        };
+        let occupied =
+            PaintingEntity::front_blocks(anchor, facing, variant.width(), variant.height());
+        if occupied.iter().any(|pos| fronts.contains(pos)) {
+            return true;
+        }
+    }
+    false
 }
 
 impl EntityBase for PaintingEntity {
@@ -264,14 +429,14 @@ impl EntityBase for PaintingEntity {
 
     fn damage_with_context(
         &self,
-        caller: &dyn EntityBase,
+        _caller: &dyn EntityBase,
         _amount: f32,
         _damage_type: DamageType,
         _position: Option<Vector3<f64>>,
-        _source: Option<&dyn EntityBase>,
-        _cause: Option<&dyn EntityBase>,
+        source: Option<&dyn EntityBase>,
+        cause: Option<&dyn EntityBase>,
     ) -> bool {
-        self.drop_and_remove(Some(caller));
+        self.drop_and_remove(source.or(cause));
         true
     }
 
@@ -369,5 +534,179 @@ mod tests {
         );
         assert_eq!(PaintingVariant::from_name("invalid"), None);
         assert_eq!(PaintingVariant::Kebab.asset_id(), "minecraft:kebab");
+    }
+
+    fn state_grid(
+        walls: Vec<BlockPos>,
+        wall: &'static pumpkin_data::BlockState,
+    ) -> impl Fn(BlockPos) -> &'static pumpkin_data::BlockState {
+        let air = pumpkin_data::Block::AIR.default_state;
+        move |pos| {
+            if walls.contains(&pos) { wall } else { air }
+        }
+    }
+
+    #[test]
+    fn one_block_stone_face_with_air_accepts_a_painting() {
+        let location = BlockPos(Vector3::new(0, 64, 0));
+        let at = state_grid(vec![location], pumpkin_data::Block::STONE.default_state);
+        assert!(PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::North,
+            1,
+            1,
+            &at
+        ));
+        assert!(PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::East,
+            1,
+            1,
+            &at
+        ));
+        let area = PaintingVariant::all_placeable()
+            .iter()
+            .filter(|variant| {
+                PaintingEntity::painting_blocks_fit(
+                    location,
+                    BlockDirection::North,
+                    variant.width(),
+                    variant.height(),
+                    &at,
+                )
+            })
+            .map(|variant| variant.width() * variant.height())
+            .max();
+        assert_eq!(area, Some(1));
+    }
+
+    #[test]
+    fn painting_rejects_open_air_blocked_front_and_vertical_faces() {
+        let location = BlockPos(Vector3::new(0, 64, 0));
+        let air = state_grid(Vec::new(), pumpkin_data::Block::STONE.default_state);
+        assert!(!PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::North,
+            1,
+            1,
+            &air
+        ));
+
+        let stone = pumpkin_data::Block::STONE.default_state;
+        let blocked = |pos: BlockPos| {
+            if pos == location || pos == location.offset(BlockDirection::North.to_offset()) {
+                stone
+            } else {
+                pumpkin_data::Block::AIR.default_state
+            }
+        };
+        assert!(!PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::North,
+            1,
+            1,
+            blocked
+        ));
+        let solid = state_grid(vec![location], stone);
+        assert!(!PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::Up,
+            1,
+            1,
+            &solid
+        ));
+        assert!(!PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::Down,
+            1,
+            1,
+            &solid
+        ));
+    }
+
+    #[test]
+    fn painting_rejects_slab_and_snow_faces_that_are_not_sturdy() {
+        let location = BlockPos(Vector3::new(2, 70, -3));
+        for block in [pumpkin_data::Block::OAK_SLAB, pumpkin_data::Block::SNOW] {
+            let at = state_grid(vec![location], block.default_state);
+            assert!(
+                !PaintingEntity::painting_blocks_fit(location, BlockDirection::North, 1, 1, &at),
+                "{}",
+                block.name
+            );
+        }
+    }
+
+    #[test]
+    fn wider_painting_needs_every_covered_face_clear() {
+        let location = BlockPos(Vector3::new(0, 0, 0));
+        let face = BlockDirection::North;
+        let cells = PaintingEntity::covered_cells(location, face, 2, 2);
+        assert_eq!(cells.len(), 4);
+        let walls: Vec<BlockPos> = cells.iter().map(|(wall, _)| *wall).collect();
+        let at = state_grid(walls, pumpkin_data::Block::STONE.default_state);
+        assert!(PaintingEntity::painting_blocks_fit(
+            location, face, 2, 2, &at
+        ));
+        assert!(!PaintingEntity::painting_blocks_fit(
+            location, face, 4, 4, &at
+        ));
+        let only_clicked = state_grid(vec![location], pumpkin_data::Block::STONE.default_state);
+        assert!(!PaintingEntity::painting_blocks_fit(
+            location,
+            face,
+            2,
+            2,
+            &only_clicked
+        ));
+    }
+
+    #[test]
+    fn repeater_side_supports_a_painting_and_its_top_does_not() {
+        let location = BlockPos(Vector3::new(1, 2, 3));
+        let repeater = pumpkin_data::Block::REPEATER.default_state;
+        let air = pumpkin_data::Block::AIR.default_state;
+        let at = |pos: BlockPos| {
+            if pos == location { repeater } else { air }
+        };
+        assert!(hanging_surface_supports(
+            BlockDirection::North,
+            repeater,
+            air
+        ));
+        assert!(!hanging_surface_supports(BlockDirection::Up, repeater, air));
+        assert!(PaintingEntity::painting_blocks_fit(
+            location,
+            BlockDirection::North,
+            1,
+            1,
+            at
+        ));
+    }
+
+    #[test]
+    fn anchor_round_trips_through_the_placed_center() {
+        let location = BlockPos(Vector3::new(10, 64, 20));
+        for (face, width, height) in [
+            (BlockDirection::North, 1, 1),
+            (BlockDirection::North, 2, 2),
+            (BlockDirection::South, 4, 3),
+            (BlockDirection::East, 3, 2),
+            (BlockDirection::West, 2, 1),
+        ] {
+            let center = PaintingEntity::calculate_center_pos(location, face, width, height);
+            assert_eq!(
+                PaintingEntity::anchor_from_center(center, face, width, height),
+                Some(location)
+            );
+        }
+    }
+
+    #[test]
+    fn survival_break_drops_one_painting_and_creative_drops_none() {
+        assert!(painting_should_drop(true, false));
+        assert!(!painting_should_drop(true, true));
+        assert!(!painting_should_drop(false, false));
+        assert!(!painting_should_drop(false, true));
     }
 }

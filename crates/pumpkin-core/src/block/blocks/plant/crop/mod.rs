@@ -59,13 +59,16 @@ trait CropBlockBase: PlantBlockBase {
 
     fn is_valid_bonemeal_target(&self, world: &World, pos: &BlockPos) -> bool {
         let (block, state) = world.get_block_and_state_id(pos);
-        self.get_age(state, block) < self.max_age()
+        bonemeal_next_age(self.get_age(state, block), self.max_age(), 1).is_some()
     }
 
     fn perform_bonemeal(&self, world: &Arc<World>, pos: &BlockPos) {
         let (block, state) = world.get_block_and_state_id(pos);
         let age = self.get_age(state, block);
-        let new_age = (age + self.bonemeal_age_increase()).min(self.max_age());
+        let Some(new_age) = bonemeal_next_age(age, self.max_age(), self.bonemeal_age_increase())
+        else {
+            return;
+        };
         world.set_block_state(
             pos,
             self.state_with_age(block, state, new_age),
@@ -100,6 +103,16 @@ trait CropBlockBase: PlantBlockBase {
                 }
             }
         }
+    }
+}
+
+const fn bonemeal_next_age(age: i32, max_age: i32, increase: i32) -> Option<i32> {
+    if age >= max_age {
+        None
+    } else {
+        let increase = if increase < 1 { 1 } else { increase };
+        let next = age + increase;
+        Some(if next > max_age { max_age } else { next })
     }
 }
 
@@ -145,4 +158,29 @@ pub fn get_available_moisture(world: &World, pos: &BlockPos, block: &Block) -> f
     }
 
     moisture
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::blocks::plant::crop::wheat::WheatBlock;
+
+    #[test]
+    fn bone_meal_increases_crop_age_below_max_and_refuses_max() {
+        let wheat = WheatBlock;
+        let block = &Block::WHEAT;
+        let age = wheat.get_age(block.default_state.id, block);
+        assert!(age < wheat.max_age());
+        let next = bonemeal_next_age(age, wheat.max_age(), wheat.bonemeal_age_increase());
+        let next_age = next.unwrap_or(age);
+        assert!(next.is_some());
+        assert!(next_age > age);
+        assert!(next_age <= wheat.max_age());
+        let grown = wheat.state_with_age(block, block.default_state.id, next_age);
+        assert_eq!(wheat.get_age(grown, block), next_age);
+
+        let mature = wheat.state_with_age(block, block.default_state.id, wheat.max_age());
+        assert!(bonemeal_next_age(wheat.get_age(mature, block), wheat.max_age(), 4).is_none());
+        assert!(bonemeal_next_age(2, 7, 0).is_some_and(|age| age > 2));
+    }
 }

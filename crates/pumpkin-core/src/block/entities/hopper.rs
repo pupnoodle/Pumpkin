@@ -427,46 +427,61 @@ impl HopperBlockEntity {
         }
         false
     }
-    pub fn add_one_item(from: &dyn Inventory, to: &dyn Inventory, item: &ItemStack) -> bool {
-        let mut success = false;
+    /// Vanilla `HopperBlockEntity.addItem`: moves as much of `item` as `to` can fit and
+    /// returns the remainder. An empty slot takes the whole stack, a matching slot takes
+    /// whatever room it has left.
+    pub fn add_item(from: &dyn Inventory, to: &dyn Inventory, item: &ItemStack) -> ItemStack {
+        let mut remaining = item.clone();
+        if remaining.is_empty() {
+            return remaining;
+        }
         let to_empty = to.is_empty();
+        let mut moved = false;
         for j in 0..to.size() {
-            if to.is_valid_slot_for(j, item) {
-                let mut dst = to.get_stack(j);
-                if dst.is_empty() {
-                    dst = item.clone();
-                    to.set_stack(j, dst);
-                    success = true;
-                } else if dst.item_count < dst.get_max_stack_size()
-                    && dst.are_items_and_components_equal(item)
-                {
-                    dst.item_count += 1;
-                    to.set_stack(j, dst);
-                    success = true;
-                }
-                if success {
-                    if to_empty
-                        && let Some(hopper) = to.as_any().downcast_ref::<Self>()
-                        && hopper.cooldown_time.load(Ordering::Relaxed) <= 8
-                    {
-                        if let Some(from_hopper) = from.as_any().downcast_ref::<Self>() {
-                            if from_hopper.cooldown_time.load(Ordering::Relaxed)
-                                >= hopper.cooldown_time.load(Ordering::Relaxed)
-                            {
-                                hopper.cooldown_time.store(7, Ordering::Relaxed);
-                            } else {
-                                hopper.cooldown_time.store(8, Ordering::Relaxed);
-                            }
-                        } else {
-                            hopper.cooldown_time.store(8, Ordering::Relaxed);
-                        }
-                    }
-                    to.mark_dirty();
-                    return true;
-                }
+            if remaining.is_empty() {
+                break;
+            }
+            if !to.is_valid_slot_for(j, &remaining) {
+                continue;
+            }
+            let mut dst = to.get_stack(j);
+            if dst.is_empty() {
+                to.set_stack(j, remaining.clone());
+                remaining = ItemStack::EMPTY.clone();
+                moved = true;
+            } else if dst.item_count < dst.get_max_stack_size()
+                && dst.are_items_and_components_equal(&remaining)
+            {
+                let space = dst.get_max_stack_size() - dst.item_count;
+                let take = space.min(remaining.item_count);
+                dst.item_count += take;
+                to.set_stack(j, dst);
+                remaining.item_count -= take;
+                moved = true;
             }
         }
-        false
+        if moved
+            && to_empty
+            && let Some(hopper) = to.as_any().downcast_ref::<Self>()
+            && hopper.cooldown_time.load(Ordering::Relaxed) <= 8
+        {
+                        if let Some(from_hopper) = from.as_any().downcast_ref::<Self>() {
+                            if from_hopper.ticked_game_time.load(Ordering::Relaxed)
+                                >= hopper.ticked_game_time.load(Ordering::Relaxed)
+                            {
+                    hopper.cooldown_time.store(7, Ordering::Relaxed);
+                } else {
+                    hopper.cooldown_time.store(8, Ordering::Relaxed);
+                }
+            } else {
+                hopper.cooldown_time.store(8, Ordering::Relaxed);
+            }
+        }
+        remaining
+    }
+
+    pub fn add_one_item(from: &dyn Inventory, to: &dyn Inventory, item: &ItemStack) -> bool {
+        Self::add_item(from, to, item).item_count != item.item_count
     }
 }
 

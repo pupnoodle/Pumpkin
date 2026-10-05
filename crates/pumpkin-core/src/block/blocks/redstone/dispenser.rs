@@ -15,9 +15,13 @@ use crate::block::{
 };
 use crate::entity::ageable::AgeableMob;
 use crate::entity::decoration::armor_stand::ArmorStandEntity;
+use crate::entity::decoration::leash_knot::LeashKnotEntity;
+use crate::entity::experience_orb::ExperienceOrbEntity;
 use crate::entity::item::ItemEntity;
+use crate::entity::passive::axolotl::AxolotlEntity;
+use crate::entity::passive::mooshroom::{MooshroomEntity, MooshroomVariant};
 use crate::entity::passive::sheep::SheepEntity;
-use crate::entity::projectile::ThrownItemEntity;
+use crate::entity::passive::snow_golem::SnowGolemEntity;
 use crate::entity::projectile::arrow::{ArrowEntity, ArrowPickup};
 use crate::entity::projectile::egg::EggEntity;
 use crate::entity::projectile::firework_rocket::FireworkRocketEntity;
@@ -26,6 +30,7 @@ use crate::entity::projectile::small_fireball::SmallFireballEntity;
 use crate::entity::projectile::snowball::SnowballEntity;
 use crate::entity::projectile::splash_potion::SplashPotionEntity;
 use crate::entity::projectile::wind_charge::{WIND_CHARGE_GRAVITY, WindChargeEntity};
+use crate::entity::projectile::{ProjectileHit, ThrownItemEntity};
 use crate::entity::tnt::TNTEntity;
 use crate::entity::r#type::from_type;
 use crate::entity::vehicle::boat::BoatEntity;
@@ -52,7 +57,7 @@ use pumpkin_data::block_properties::{
 };
 use pumpkin_data::data_component::DataComponent;
 use pumpkin_data::data_component_impl::{EquippableImpl, IDSet, PotionContentsImpl};
-use pumpkin_data::entity::{EntityType, entity_from_egg};
+use pumpkin_data::entity::{EntityStatus, EntityType, entity_from_egg};
 use pumpkin_data::fluid::Fluid;
 use pumpkin_data::game_event::GameEvent;
 use pumpkin_data::item::Item;
@@ -71,6 +76,8 @@ use pumpkin_inventory::screen_handler::{
     InventoryPlayer, ScreenHandlerFactory, SharedScreenHandler,
 };
 use pumpkin_macros::pumpkin_block;
+use pumpkin_protocol::bedrock::server::actor_event::ActorEventID;
+use pumpkin_protocol::codec::item_stack_seralizer::ItemStackSerializer;
 use pumpkin_util::math::boundingbox::{BoundingBox, EntityDimensions};
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_util::math::vector3::Vector3;
@@ -202,6 +209,198 @@ fn is_water_bottle(stack: &ItemStack) -> bool {
             .get_data_component::<PotionContentsImpl>()
             .and_then(|contents| contents.potion_id)
             == Some(i32::from(Potion::WATER.id))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirectItemUse {
+    BoneMeal,
+    ExperienceBottle,
+}
+
+const fn direct_item_use(item_id: u16) -> Option<DirectItemUse> {
+    if item_id == Item::BONE_MEAL.id {
+        Some(DirectItemUse::BoneMeal)
+    } else if item_id == Item::EXPERIENCE_BOTTLE.id {
+        Some(DirectItemUse::ExperienceBottle)
+    } else {
+        None
+    }
+}
+
+const EXPERIENCE_BOTTLE_MIN: u32 = 3;
+const EXPERIENCE_BOTTLE_SPAN: u32 = 9;
+const EXPERIENCE_BOTTLE_GRAVITY: f64 = 0.07;
+
+const fn experience_bottle_amount(roll: u32) -> u32 {
+    EXPERIENCE_BOTTLE_MIN + roll % EXPERIENCE_BOTTLE_SPAN
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BucketMob {
+    Axolotl,
+    Cod,
+    Salmon,
+    Pufferfish,
+    TropicalFish,
+    Tadpole,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BucketPlace {
+    Drop,
+    Empty { mob: Option<BucketMob> },
+}
+
+const fn bucket_mob(item_id: u16) -> Option<BucketMob> {
+    if item_id == Item::AXOLOTL_BUCKET.id {
+        Some(BucketMob::Axolotl)
+    } else if item_id == Item::COD_BUCKET.id {
+        Some(BucketMob::Cod)
+    } else if item_id == Item::SALMON_BUCKET.id {
+        Some(BucketMob::Salmon)
+    } else if item_id == Item::PUFFERFISH_BUCKET.id {
+        Some(BucketMob::Pufferfish)
+    } else if item_id == Item::TROPICAL_FISH_BUCKET.id {
+        Some(BucketMob::TropicalFish)
+    } else if item_id == Item::TADPOLE_BUCKET.id {
+        Some(BucketMob::Tadpole)
+    } else {
+        None
+    }
+}
+
+const fn bucket_mob_entity(mob: BucketMob) -> &'static EntityType {
+    match mob {
+        BucketMob::Axolotl => &EntityType::AXOLOTL,
+        BucketMob::Cod => &EntityType::COD,
+        BucketMob::Salmon => &EntityType::SALMON,
+        BucketMob::Pufferfish => &EntityType::PUFFERFISH,
+        BucketMob::TropicalFish => &EntityType::TROPICAL_FISH,
+        BucketMob::Tadpole => &EntityType::TADPOLE,
+    }
+}
+
+const fn bucket_place(item_id: u16, placed: bool, evaporated: bool) -> BucketPlace {
+    if placed {
+        BucketPlace::Empty {
+            mob: if evaporated {
+                None
+            } else {
+                bucket_mob(item_id)
+            },
+        }
+    } else {
+        BucketPlace::Drop
+    }
+}
+
+const fn bucket_empty_sound(item_id: u16) -> Sound {
+    if item_id == Item::AXOLOTL_BUCKET.id {
+        Sound::ItemBucketEmptyAxolotl
+    } else if item_id == Item::TADPOLE_BUCKET.id {
+        Sound::ItemBucketEmptyTadpole
+    } else if item_id == Item::LAVA_BUCKET.id {
+        Sound::ItemBucketEmptyLava
+    } else if item_id == Item::POWDER_SNOW_BUCKET.id {
+        Sound::ItemBucketEmptyPowderSnow
+    } else if bucket_mob(item_id).is_some() {
+        Sound::ItemBucketEmptyFish
+    } else {
+        Sound::ItemBucketEmpty
+    }
+}
+
+fn bucket_mob_spawn(pos: BlockPos) -> Vector3<f64> {
+    Vector3::new(
+        f64::from(pos.0.x) + 0.5,
+        f64::from(pos.0.y),
+        f64::from(pos.0.z) + 0.5,
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShearEffect {
+    Wool,
+    Mushrooms,
+    Pumpkin,
+    BreakKnot,
+    CutLeash,
+    None,
+}
+
+struct ShearState {
+    baby: bool,
+    sheared: bool,
+    has_pumpkin: bool,
+    leashed: bool,
+}
+
+fn shear_effect(resource_name: &str, state: &ShearState) -> ShearEffect {
+    match resource_name {
+        "sheep" if !state.baby && !state.sheared => ShearEffect::Wool,
+        "mooshroom" if !state.baby => ShearEffect::Mushrooms,
+        "snow_golem" if state.has_pumpkin => ShearEffect::Pumpkin,
+        "leash_knot" => ShearEffect::BreakKnot,
+        _ if state.leashed => ShearEffect::CutLeash,
+        _ => ShearEffect::None,
+    }
+}
+
+struct ThrownExperienceBottle {
+    thrown: ThrownItemEntity,
+}
+
+impl ThrownExperienceBottle {
+    const fn new(entity: Entity) -> Self {
+        Self {
+            thrown: ThrownItemEntity {
+                entity,
+                owner_id: None,
+                collides_with_projectiles: false,
+                has_hit: AtomicBool::new(false),
+                gravity: EXPERIENCE_BOTTLE_GRAVITY,
+            },
+        }
+    }
+}
+
+impl EntityBase for ThrownExperienceBottle {
+    fn get_entity(&self) -> &Entity {
+        &self.thrown.entity
+    }
+
+    fn get_living_entity(&self) -> Option<&crate::entity::living::LivingEntity> {
+        None
+    }
+
+    fn cast_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn tick(&self, caller: &dyn EntityBase, _server: &crate::server::Server) {
+        self.thrown.process_tick(caller);
+    }
+
+    fn init_data_tracker(&self) {
+        self.thrown.entity.set_synced_data(
+            pumpkin_data::tracked_data::thrown_experience_bottle::ITEM_STACK,
+            ItemStackSerializer::from(ItemStack::new(1, &Item::EXPERIENCE_BOTTLE)),
+        );
+    }
+
+    fn on_hit(&self, hit: ProjectileHit) {
+        let world = self.thrown.entity.world.load();
+        world.send_entity_status(
+            &self.thrown.entity,
+            EntityStatus::Death,
+            Some(ActorEventID::Death),
+        );
+        ExperienceOrbEntity::spawn(
+            &world,
+            hit.hit_pos(),
+            experience_bottle_amount(rng().random()),
+        );
+    }
 }
 
 impl BlockBehaviour for DispenserBlock {
@@ -375,7 +574,7 @@ impl DispenserBlock {
             Self::dispense_empty_bucket(ctx, dispenser, item);
         } else if FilledBucketItem::ids().contains(&item.item.id) {
             // Filled buckets place their fluid in front of the dispenser
-            Self::dispense_filled_bucket(ctx, item);
+            Self::dispense_filled_bucket(ctx, dispenser, item);
         } else if item.item.id == Item::FLINT_AND_STEEL.id {
             // Flint and steel light fires and prime TNT
             Self::dispense_flint_and_steel(ctx, item);
@@ -386,7 +585,8 @@ impl DispenserBlock {
             // Spawn eggs
             Self::dispense_spawn_egg(ctx, item);
         } else if item.item.id == Item::SHEARS.id {
-            // Shears harvest full beehives and shear sheep
+            // Shears carve pumpkins, harvest full beehives and shear sheep, mooshrooms,
+            // snow golems, and leads
             Self::dispense_shears(ctx, item);
         } else if item.item.id == Item::GLASS_BOTTLE.id {
             // Glass bottles fill from water and full beehives
@@ -420,9 +620,13 @@ impl DispenserBlock {
         } else if Self::dispense_equipment(ctx, item) {
             // Armor, elytra, heads, saddles, horse/wolf armor and llama carpets
             Self::play_dispense_effects(ctx, WorldEvent::SoundDispenserDispense);
+        } else if let Some(kind) = direct_item_use(item.item.id) {
+            match kind {
+                DirectItemUse::BoneMeal => Self::dispense_bone_meal(ctx, item),
+                DirectItemUse::ExperienceBottle => Self::dispense_experience_bottle(ctx, item),
+            }
         } else {
-            // TODO: Bone meal, bottles o' enchanting, chests onto llamas, brushes onto armadillos
-            // Default / Drop
+            // TODO: Chests onto llamas, brushes onto armadillos
             Self::drop_item(ctx, item);
         }
     }
@@ -830,11 +1034,14 @@ impl DispenserBlock {
         Some(stack)
     }
 
-    fn dispense_filled_bucket(ctx: &DispenseContext<'_>, item: &mut ItemStack) {
+    fn dispense_filled_bucket(
+        ctx: &DispenseContext<'_>,
+        dispenser: &DispenserBlockEntity,
+        item: &mut ItemStack,
+    ) {
         let front = Self::target_position(ctx);
-
-        // TODO: Spawn the stored entity for axolotl/fish/tadpole buckets, like the player path.
-        let emptied = if should_evaporate_in_nether(item.item, ctx.world) {
+        let evaporated = should_evaporate_in_nether(item.item, ctx.world);
+        let placed = if evaporated {
             play_bucket_evaporation(ctx.world, &front.to_f64());
             true
         } else {
@@ -846,12 +1053,96 @@ impl DispenserBlock {
             )
         };
 
-        if emptied {
-            *item = ItemStack::new(1, &Item::BUCKET);
+        match bucket_place(item.item.id, placed, evaporated) {
+            BucketPlace::Drop => Self::drop_item(ctx, item),
+            BucketPlace::Empty { mob } => {
+                if let Some(mob) = mob {
+                    Self::spawn_bucket_mob(ctx, item, front, mob);
+                }
+                if !evaporated {
+                    ctx.world.play_sound(
+                        bucket_empty_sound(item.item.id),
+                        SoundCategory::Blocks,
+                        &front.to_f64(),
+                    );
+                }
+                Self::consume_with_remainder(
+                    ctx,
+                    dispenser,
+                    item,
+                    ItemStack::new(1, &Item::BUCKET),
+                );
+                Self::play_dispense_effects(ctx, WorldEvent::SoundDispenserDispense);
+            }
+        }
+    }
+
+    fn spawn_bucket_mob(
+        ctx: &DispenseContext<'_>,
+        item: &ItemStack,
+        pos: BlockPos,
+        mob: BucketMob,
+    ) {
+        let spawned = from_type(
+            bucket_mob_entity(mob),
+            bucket_mob_spawn(pos),
+            ctx.world,
+            Uuid::new_v4(),
+        );
+        prepare_egg_mob(item, &spawned, ctx.world, None);
+        if let Some(axolotl) = spawned.cast_any().downcast_ref::<AxolotlEntity>() {
+            axolotl.set_from_bucket(true);
+        }
+        if let Some(mob) = spawned.get_mob() {
+            mob.get_mob_entity()
+                .persistence_required
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        ctx.world.spawn_entity(spawned);
+    }
+
+    fn dispense_bone_meal(ctx: &DispenseContext<'_>, item: &mut ItemStack) {
+        let target = Self::target_position(ctx);
+        let block = ctx.world.get_block(&target);
+        let state_id = ctx.world.get_block_state_id(&target);
+        if ctx
+            .world
+            .block_registry
+            .bone_meal(block, ctx.world, &target, state_id)
+        {
+            item.decrement(1);
+            ctx.world
+                .sync_world_event(WorldEvent::ParticlesAndSoundPlantGrowth, target, 15);
             Self::play_dispense_effects(ctx, WorldEvent::SoundDispenserDispense);
         } else {
-            Self::drop_item(ctx, item);
+            Self::play_dispense_effects(ctx, WorldEvent::SoundDispenserFail);
         }
+    }
+
+    fn dispense_experience_bottle(ctx: &DispenseContext<'_>, item: &mut ItemStack) {
+        let _ = item.split(1);
+        let entity = Entity::new(
+            ctx.world.clone(),
+            Self::projectile_spawn_position(ctx),
+            &EntityType::EXPERIENCE_BOTTLE,
+        );
+        let bottle = ThrownExperienceBottle::new(entity);
+        Self::launch_thrown(
+            ctx,
+            &bottle.thrown,
+            Self::DEFAULT_PROJECTILE_POWER,
+            Self::DEFAULT_PROJECTILE_UNCERTAINTY,
+        );
+        ctx.world.play_sound(
+            Sound::EntityExperienceBottleThrow,
+            SoundCategory::Neutral,
+            &bottle.thrown.entity.pos.load(),
+        );
+        Self::finish_projectile_launch(
+            ctx,
+            Arc::new(bottle),
+            WorldEvent::SoundDispenserProjectileLaunch,
+        );
     }
 
     fn dispense_flint_and_steel(ctx: &DispenseContext<'_>, item: &mut ItemStack) {
@@ -946,13 +1237,41 @@ impl DispenserBlock {
     }
 
     fn dispense_shears(ctx: &DispenseContext<'_>, item: &mut ItemStack) {
-        if Self::shear_beehive(ctx) || Self::shear_entity_in_front(ctx) {
+        if Self::shear_pumpkin(ctx)
+            || Self::shear_beehive(ctx)
+            || Self::shear_entity_in_front(ctx)
+        {
             // `damage_item` already consumes the tool from the stack when it breaks.
             let _ = item.damage_item(1);
             Self::play_dispense_effects(ctx, WorldEvent::SoundDispenserDispense);
         } else {
             Self::play_dispense_effects(ctx, WorldEvent::SoundDispenserFail);
         }
+    }
+
+    fn shear_pumpkin(ctx: &DispenseContext<'_>) -> bool {
+        let target = Self::target_position(ctx);
+        let block = ctx.world.get_block(&target);
+        if block != &Block::PUMPKIN {
+            return false;
+        }
+
+        ctx.world.set_block_state(
+            &target,
+            Block::CARVED_PUMPKIN.default_state.id,
+            BlockFlags::NOTIFY_ALL,
+        );
+        ctx.world.play_sound(
+            Sound::BlockPumpkinCarve,
+            SoundCategory::Blocks,
+            &target.to_f64(),
+        );
+        Self::drop_at(
+            ctx.world,
+            target.to_centered_f64(),
+            ItemStack::new(4, &Item::PUMPKIN_SEEDS),
+        );
+        true
     }
 
     fn shear_beehive(ctx: &DispenseContext<'_>) -> bool {
@@ -989,29 +1308,198 @@ impl DispenserBlock {
         let target_box = BoundingBox::from_block(&Self::target_position(ctx));
 
         for entity in ctx.world.get_entities_at_box(&target_box) {
-            let Some(sheep) = entity.cast_any().downcast_ref::<SheepEntity>() else {
-                continue;
-            };
-            if sheep.is_sheared() || sheep.is_baby() || !entity.get_entity().is_alive() {
-                continue;
+            if Self::try_shear_entity(ctx, &entity) {
+                return true;
             }
-
-            let position = entity.get_entity().pos.load();
-            sheep.set_sheared(true);
-            ctx.world
-                .play_sound(Sound::EntitySheepShear, SoundCategory::Blocks, &position);
-
-            let count = rng().random_range(1..=3);
-            Self::drop_at(
-                ctx.world,
-                position,
-                ItemStack::new(count, wool_of_color(sheep.get_color())),
-            );
-
-            return true;
         }
 
         false
+    }
+
+    fn try_shear_entity(ctx: &DispenseContext<'_>, entity: &Arc<dyn EntityBase>) -> bool {
+        let base = entity.get_entity();
+        if !base.is_alive() {
+            return false;
+        }
+
+        let (baby, sheared, has_pumpkin) = Self::shear_flags(entity.as_ref());
+        let effect = shear_effect(
+            base.entity_type.resource_name,
+            &ShearState {
+                baby,
+                sheared,
+                has_pumpkin,
+                leashed: base.is_leashed(),
+            },
+        );
+        if effect == ShearEffect::None || Self::shear_cancelled(ctx, entity) {
+            return false;
+        }
+
+        match effect {
+            ShearEffect::Wool => Self::shear_sheep(ctx, entity),
+            ShearEffect::Mushrooms => Self::shear_mooshroom(ctx, entity),
+            ShearEffect::Pumpkin => Self::shear_snow_golem(ctx, entity),
+            ShearEffect::BreakKnot => Self::shear_leash_knot(ctx, entity),
+            ShearEffect::CutLeash => Self::cut_leash(ctx, entity),
+            ShearEffect::None => false,
+        }
+    }
+
+    fn shear_flags(entity: &dyn EntityBase) -> (bool, bool, bool) {
+        if let Some(sheep) = entity.cast_any().downcast_ref::<SheepEntity>() {
+            return (sheep.is_baby(), sheep.is_sheared(), false);
+        }
+        if let Some(mooshroom) = entity.cast_any().downcast_ref::<MooshroomEntity>() {
+            return (mooshroom.is_baby(), false, false);
+        }
+        if let Some(golem) = entity.cast_any().downcast_ref::<SnowGolemEntity>() {
+            return (false, false, golem.has_pumpkin());
+        }
+        (false, false, false)
+    }
+
+    fn shear_cancelled(ctx: &DispenseContext<'_>, target: &Arc<dyn EntityBase>) -> bool {
+        let Some(server) = ctx.world.server.upgrade() else {
+            return false;
+        };
+        let mut event =
+            crate::plugin::api::events::block::block_shear_entity::BlockShearEntityEvent::new(
+                *ctx.position,
+                ctx.world.clone(),
+                target.clone(),
+                ItemStack::new(1, &Item::SHEARS),
+            );
+        server.plugin_manager.fire_blocking(&server, &mut event);
+        event.cancelled
+    }
+
+    fn shear_sheep(ctx: &DispenseContext<'_>, entity: &Arc<dyn EntityBase>) -> bool {
+        let Some(sheep) = entity.cast_any().downcast_ref::<SheepEntity>() else {
+            return false;
+        };
+        let position = entity.get_entity().pos.load();
+        sheep.set_sheared(true);
+        ctx.world
+            .play_sound(Sound::EntitySheepShear, SoundCategory::Blocks, &position);
+        let count = rng().random_range(1..=3);
+        Self::drop_at(
+            ctx.world,
+            position,
+            ItemStack::new(count, wool_of_color(sheep.get_color())),
+        );
+        true
+    }
+
+    fn shear_mooshroom(ctx: &DispenseContext<'_>, entity: &Arc<dyn EntityBase>) -> bool {
+        let Some(mooshroom) = entity.cast_any().downcast_ref::<MooshroomEntity>() else {
+            return false;
+        };
+        let base = entity.get_entity();
+        let position = base.pos.load();
+        let age = mooshroom.get_age();
+        let yaw = base.yaw.load();
+        let pitch = base.pitch.load();
+        let mushroom = if mooshroom.get_variant() == MooshroomVariant::Brown {
+            &Item::BROWN_MUSHROOM
+        } else {
+            &Item::RED_MUSHROOM
+        };
+
+        ctx.world.play_sound(
+            Sound::EntityMooshroomShear,
+            SoundCategory::Blocks,
+            &position,
+        );
+        for _ in 0..5 {
+            Self::drop_at(ctx.world, position, ItemStack::new(1, mushroom));
+        }
+        ctx.world.spawn_particle(
+            position + Vector3::new(0.0, 0.5, 0.0),
+            Vector3::new(0.5, 0.5, 0.5),
+            0.0,
+            1,
+            Particle::Explosion,
+        );
+
+        base.remove();
+        let cow = from_type(&EntityType::COW, position, ctx.world, Uuid::new_v4());
+        if let Some(ageable) = cow.get_mob().and_then(|mob| mob.as_ageable()) {
+            ageable.set_age(age);
+        }
+        cow.get_entity().set_rotation(yaw, pitch);
+        ctx.world.spawn_entity(cow);
+        true
+    }
+
+    fn shear_snow_golem(ctx: &DispenseContext<'_>, entity: &Arc<dyn EntityBase>) -> bool {
+        let Some(golem) = entity.cast_any().downcast_ref::<SnowGolemEntity>() else {
+            return false;
+        };
+        let position = entity.get_entity().pos.load();
+        golem.set_has_pumpkin(false);
+        ctx.world.play_sound(
+            Sound::EntitySnowGolemShear,
+            SoundCategory::Blocks,
+            &position,
+        );
+        Self::drop_at(
+            ctx.world,
+            position,
+            ItemStack::new(1, &Item::CARVED_PUMPKIN),
+        );
+        true
+    }
+
+    fn shear_leash_knot(ctx: &DispenseContext<'_>, entity: &Arc<dyn EntityBase>) -> bool {
+        let Some(knot) = entity.cast_any().downcast_ref::<LeashKnotEntity>() else {
+            return false;
+        };
+        let knot_id = entity.get_entity().entity_id;
+        let pos = entity.get_entity().pos.load();
+        let search = BoundingBox::new_from_pos(
+            pos.x,
+            pos.y,
+            pos.z,
+            &EntityDimensions {
+                width: 32.0,
+                height: 32.0,
+                eye_height: 16.0,
+            },
+        );
+        let mut released = false;
+        for other in ctx.world.get_entities_at_box(&search) {
+            let other_entity = other.get_entity();
+            let attached = other_entity
+                .leashed_to
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .is_some_and(|holder| holder.get_entity().entity_id == knot_id);
+            if attached && Self::cut_leash(ctx, &other) {
+                released = true;
+            }
+        }
+        if released {
+            knot.get_entity().remove();
+        }
+        released
+    }
+
+    fn cut_leash(ctx: &DispenseContext<'_>, entity: &Arc<dyn EntityBase>) -> bool {
+        let base = entity.get_entity();
+        if !base.is_leashed() {
+            return false;
+        }
+        let position = base.pos.load();
+        base.unleash();
+        if base.is_leashed() {
+            return false;
+        }
+        Self::drop_at(ctx.world, position, ItemStack::new(1, &Item::LEAD));
+        ctx.world
+            .play_sound(Sound::ItemLeadUntied, SoundCategory::Neutral, &position);
+        true
     }
 
     fn dispense_glass_bottle(
@@ -1276,5 +1764,207 @@ impl DispenserBlock {
 
         let item_entity = Arc::new(ItemEntity::new_with_velocity(entity, stack, velocity, 40));
         ctx.world.spawn_entity(item_entity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BucketMob, BucketPlace, DirectItemUse, ShearEffect, ShearState, bucket_empty_sound,
+        bucket_mob_entity, bucket_mob_spawn, bucket_place, direct_item_use,
+        experience_bottle_amount, shear_effect,
+    };
+    use pumpkin_data::entity::EntityType;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::sound::Sound;
+    use pumpkin_util::math::position::BlockPos;
+    use pumpkin_util::math::vector3::Vector3;
+
+    #[test]
+    fn bone_meal_and_experience_bottles_are_used_not_dropped() {
+        assert_eq!(
+            direct_item_use(Item::BONE_MEAL.id),
+            Some(DirectItemUse::BoneMeal)
+        );
+        assert_eq!(
+            direct_item_use(Item::EXPERIENCE_BOTTLE.id),
+            Some(DirectItemUse::ExperienceBottle)
+        );
+        assert_eq!(direct_item_use(Item::STICK.id), None);
+        assert_eq!(direct_item_use(Item::ARROW.id), None);
+    }
+
+    #[test]
+    fn experience_bottle_amount_is_three_through_eleven() {
+        let amounts: Vec<u32> = (0..EXPERIENCE_SPAN_CHECK)
+            .map(experience_bottle_amount)
+            .collect();
+        assert!(amounts.iter().all(|amount| (3..=11).contains(amount)));
+        assert_eq!(experience_bottle_amount(0), 3);
+        assert_eq!(experience_bottle_amount(8), 11);
+        assert_eq!(experience_bottle_amount(9), 3);
+    }
+
+    const EXPERIENCE_SPAN_CHECK: u32 = 18;
+
+    #[test]
+    fn placed_buckets_become_empty_and_keep_aquatic_mobs() {
+        let fluids = [
+            Item::WATER_BUCKET.id,
+            Item::LAVA_BUCKET.id,
+            Item::POWDER_SNOW_BUCKET.id,
+        ];
+        for item_id in fluids {
+            assert_eq!(
+                bucket_place(item_id, true, false),
+                BucketPlace::Empty { mob: None }
+            );
+            assert_eq!(bucket_place(item_id, false, false), BucketPlace::Drop);
+        }
+
+        let mobs = [
+            (
+                Item::AXOLOTL_BUCKET.id,
+                BucketMob::Axolotl,
+                &EntityType::AXOLOTL,
+            ),
+            (Item::COD_BUCKET.id, BucketMob::Cod, &EntityType::COD),
+            (
+                Item::SALMON_BUCKET.id,
+                BucketMob::Salmon,
+                &EntityType::SALMON,
+            ),
+            (
+                Item::PUFFERFISH_BUCKET.id,
+                BucketMob::Pufferfish,
+                &EntityType::PUFFERFISH,
+            ),
+            (
+                Item::TROPICAL_FISH_BUCKET.id,
+                BucketMob::TropicalFish,
+                &EntityType::TROPICAL_FISH,
+            ),
+            (
+                Item::TADPOLE_BUCKET.id,
+                BucketMob::Tadpole,
+                &EntityType::TADPOLE,
+            ),
+        ];
+        for (item_id, mob, entity_type) in mobs {
+            assert_eq!(
+                bucket_place(item_id, true, false),
+                BucketPlace::Empty { mob: Some(mob) }
+            );
+            assert_eq!(
+                bucket_place(item_id, true, true),
+                BucketPlace::Empty { mob: None }
+            );
+            assert_eq!(bucket_place(item_id, false, false), BucketPlace::Drop);
+            assert_eq!(bucket_mob_entity(mob).id, entity_type.id);
+        }
+    }
+
+    #[test]
+    fn bucket_empty_sounds_match_contents() {
+        assert_eq!(
+            bucket_empty_sound(Item::WATER_BUCKET.id),
+            Sound::ItemBucketEmpty
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::LAVA_BUCKET.id),
+            Sound::ItemBucketEmptyLava
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::POWDER_SNOW_BUCKET.id),
+            Sound::ItemBucketEmptyPowderSnow
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::AXOLOTL_BUCKET.id),
+            Sound::ItemBucketEmptyAxolotl
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::TADPOLE_BUCKET.id),
+            Sound::ItemBucketEmptyTadpole
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::COD_BUCKET.id),
+            Sound::ItemBucketEmptyFish
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::SALMON_BUCKET.id),
+            Sound::ItemBucketEmptyFish
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::PUFFERFISH_BUCKET.id),
+            Sound::ItemBucketEmptyFish
+        );
+        assert_eq!(
+            bucket_empty_sound(Item::TROPICAL_FISH_BUCKET.id),
+            Sound::ItemBucketEmptyFish
+        );
+    }
+
+    #[test]
+    fn bucket_mob_spawns_on_the_placed_fluid() {
+        let pos = BlockPos::new(3, 64, -2);
+        assert_eq!(bucket_mob_spawn(pos), Vector3::new(3.5, 64.0, -1.5));
+    }
+
+    fn shear(
+        resource_name: &str,
+        baby: bool,
+        sheared: bool,
+        has_pumpkin: bool,
+        leashed: bool,
+    ) -> ShearEffect {
+        shear_effect(
+            resource_name,
+            &ShearState {
+                baby,
+                sheared,
+                has_pumpkin,
+                leashed,
+            },
+        )
+    }
+
+    #[test]
+    fn shears_cover_sheep_mooshrooms_snow_golems_and_leads() {
+        assert_eq!(shear("sheep", false, false, false, true), ShearEffect::Wool);
+        assert_eq!(shear("sheep", true, false, false, false), ShearEffect::None);
+        assert_eq!(
+            shear("sheep", true, false, false, true),
+            ShearEffect::CutLeash
+        );
+        assert_eq!(shear("sheep", false, true, false, false), ShearEffect::None);
+        assert_eq!(
+            shear("sheep", false, true, false, true),
+            ShearEffect::CutLeash
+        );
+        assert_eq!(
+            shear("mooshroom", false, false, false, false),
+            ShearEffect::Mushrooms
+        );
+        assert_eq!(
+            shear("mooshroom", true, false, false, false),
+            ShearEffect::None
+        );
+        assert_eq!(
+            shear("snow_golem", false, false, true, false),
+            ShearEffect::Pumpkin
+        );
+        assert_eq!(
+            shear("snow_golem", false, false, false, false),
+            ShearEffect::None
+        );
+        assert_eq!(
+            shear("leash_knot", false, false, false, false),
+            ShearEffect::BreakKnot
+        );
+        assert_eq!(
+            shear("cow", false, false, false, true),
+            ShearEffect::CutLeash
+        );
+        assert_eq!(shear("cow", false, false, false, false), ShearEffect::None);
     }
 }

@@ -231,6 +231,10 @@ impl ArrowEntity {
         damage_succeeded
     }
 
+    pub fn arrow_hit_damage(speed: f64, base_damage: f64) -> i32 {
+        (speed * base_damage).ceil() as i32
+    }
+
     #[must_use]
     pub fn get_effect_color(item_stack: &ItemStack) -> i32 {
         if let Some(pc) =
@@ -749,7 +753,13 @@ impl EntityBase for ArrowEntity {
         }
 
         // Entity collisions
-        let candidates = world.get_entities_at_box(&search_box);
+        let mut candidates = world.get_entities_at_box(&search_box);
+        candidates.extend(
+            world
+                .get_players_at_box(&search_box)
+                .into_iter()
+                .map(|player| player as Arc<dyn EntityBase>),
+        );
         for cand in candidates {
             if self.should_skip_collision(entity, &cand) {
                 continue;
@@ -897,7 +907,7 @@ impl EntityBase for ArrowEntity {
                 // Calculate damage
                 let velocity = entity.velocity.load();
                 let power = velocity.length();
-                let mut damage = (power * self.get_base_damage()).ceil() as i32;
+                let mut damage = Self::arrow_hit_damage(power, self.get_base_damage());
 
                 // Apply critical hit bonus
                 if self.is_critical.load(Ordering::Relaxed) {

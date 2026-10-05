@@ -135,6 +135,16 @@ pub struct JavaClient {
     suspend_flushing: Arc<AtomicBool>,
 }
 
+pub(crate) fn packet_version_for(client_version: JavaMinecraftVersion) -> JavaMinecraftVersion {
+    if client_version != JavaMinecraftVersion::Unknown
+        && client_version >= JavaMinecraftVersion::V_26_2
+    {
+        client_version
+    } else {
+        CURRENT_MC_VERSION
+    }
+}
+
 impl JavaClient {
     #[must_use]
     pub fn from_pending(
@@ -349,19 +359,17 @@ impl JavaClient {
             return;
         }
 
+        let version = packet_version_for(self.version.load());
         let (tx, rx) = oneshot::channel();
         rayon::spawn(move || {
             let mut serialized = Vec::with_capacity(valid_chunks.len());
             for chunk in valid_chunks {
                 let mut buf = Vec::with_capacity(32 * 1024);
-                if let Err(err) = buf.write_var_int(&VarInt(CChunkData::to_id(CURRENT_MC_VERSION)))
-                {
+                if let Err(err) = buf.write_var_int(&VarInt(CChunkData::to_id(version))) {
                     error!("Failed to write chunk data id: {err:?}");
                     continue;
                 }
-                if let Err(err) =
-                    CChunkData(&chunk).write_packet_data(&mut buf, &CURRENT_MC_VERSION)
-                {
+                if let Err(err) = CChunkData(&chunk).write_packet_data(&mut buf, &version) {
                     error!("Failed to write chunk data: {err:?}");
                     continue;
                 }
@@ -634,7 +642,7 @@ impl JavaClient {
     }
 
     pub fn serialize_packet<P: ClientPacket>(&self, packet: &P) -> Result<Bytes, WritingError> {
-        Self::serialize_packet_for_version(packet, CURRENT_MC_VERSION)
+        Self::serialize_packet_for_version(packet, packet_version_for(self.version.load()))
     }
 
     pub fn try_send_packet<P: ClientPacket>(&self, packet: &P) {
@@ -660,7 +668,7 @@ impl JavaClient {
         packet: &P,
         write: impl Write,
     ) -> Result<(), WritingError> {
-        Self::write_packet_for_version(packet, CURRENT_MC_VERSION, write)
+        Self::write_packet_for_version(packet, packet_version_for(self.version.load()), write)
     }
 
     /// Handles an incoming packet, routing it to the appropriate handler based on the current connection state.
@@ -726,8 +734,7 @@ impl JavaClient {
         server: &Arc<Server>,
         packet: &RawPacket,
     ) -> Result<(), Box<dyn PumpkinError>> {
-        // The multiversion plugin has converted older clients' packets to 26.3 by now.
-        let version = CURRENT_MC_VERSION;
+        let version = packet_version_for(self.version.load());
 
         let mut event = crate::plugin::server::packet::PacketReceivedEvent::new(
             player.clone(),
@@ -1214,5 +1221,36 @@ impl JavaClient {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod packet_version_tests {
+    use super::packet_version_for;
+    use pumpkin_data::packet::CURRENT_MC_VERSION;
+    use pumpkin_util::version::JavaMinecraftVersion;
+
+    #[test]
+    fn recent_clients_keep_their_protocol_and_older_ones_stay_on_current() {
+        assert_eq!(
+            packet_version_for(JavaMinecraftVersion::V_26_3),
+            JavaMinecraftVersion::V_26_3
+        );
+        assert_eq!(
+            packet_version_for(JavaMinecraftVersion::V_26_2),
+            JavaMinecraftVersion::V_26_2
+        );
+        assert_eq!(
+            packet_version_for(JavaMinecraftVersion::V_1_21_11),
+            CURRENT_MC_VERSION
+        );
+        assert_eq!(
+            packet_version_for(JavaMinecraftVersion::V_1_0),
+            CURRENT_MC_VERSION
+        );
+        assert_eq!(
+            packet_version_for(JavaMinecraftVersion::Unknown),
+            CURRENT_MC_VERSION
+        );
     }
 }

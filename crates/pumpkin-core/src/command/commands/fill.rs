@@ -55,7 +55,7 @@ fn fill_blocks(
     source: &CommandSource,
     from: BlockPos,
     to: BlockPos,
-    target_block: &'static Block,
+    target_state_id: BlockStateId,
     mode: FillMode,
     filter: Option<&BlockPredicate>,
     _strict: bool,
@@ -85,7 +85,6 @@ fn fill_blocks(
         ));
     }
 
-    let target_state_id = target_block.default_state.id;
     let mut changed_positions = Vec::new();
 
     let min_chunk_x = min_x >> 4;
@@ -199,11 +198,14 @@ fn fill_blocks(
                 let batch_inputs = updates_for_chunk
                     .iter()
                     .map(|&(rx, y, rz, sid, _)| (rx, y, rz, sid));
-                chunk.set_blocks_batch(batch_inputs);
+                let replaced_states = chunk.set_blocks_batch(batch_inputs);
 
                 let chunk_changed = updates_for_chunk
                     .into_iter()
-                    .map(|(_, _, _, new_id, pos)| (pos, new_id))
+                    .zip(replaced_states)
+                    .map(|((_, _, _, new_id, pos), (_, _, _, old_id))| {
+                        (pos, new_id, old_id)
+                    })
                     .collect::<Vec<_>>();
 
                 (chunk_changed, block_entities_to_remove)
@@ -213,7 +215,24 @@ fn fill_blocks(
                 for pos in be_to_remove {
                     world.remove_block_entity(&pos);
                 }
-                changed_positions.extend(chunk_changed);
+                for (pos, new_state_id, old_state_id) in &chunk_changed {
+                    let new_block = Block::from_state_id(*new_state_id);
+                    if Block::from_state_id(*old_state_id) != new_block {
+                        world.block_registry.on_placed(
+                            &world,
+                            &new_block,
+                            *new_state_id,
+                            pos,
+                            *old_state_id,
+                            false,
+                        );
+                    }
+                }
+                changed_positions.extend(
+                    chunk_changed
+                        .into_iter()
+                        .map(|(pos, new_id, _)| (pos, new_id)),
+                );
             }
         }
     }
@@ -260,7 +279,7 @@ impl CommandExecutor for FillExecutor {
             &context.source,
             from,
             to,
-            block,
+            block.state,
             self.mode,
             filter.as_ref(),
             self.strict,

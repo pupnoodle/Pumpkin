@@ -49,3 +49,15 @@ impl PendingConnection {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::packet::LOWEST_SUPPORTED_MC_VERSION;
+
+    #[test]
+    fn protocol_776_is_not_below_lowest_and_775_is() {
+        let lowest = LOWEST_SUPPORTED_MC_VERSION.protocol_version() as u32;
+        assert!(776 >= lowest);
+        assert!(775 < lowest);
+    }
+}

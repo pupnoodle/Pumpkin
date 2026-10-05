@@ -797,11 +797,6 @@ impl Mob for WanderingTraderEntity {
                 }
             }
         }
-
-        let current_age = self.get_age();
-        if current_age < 0 {
-            self.set_age(0);
-        }
     }
 
     fn mob_interact(&self, player: &Arc<Player>, item_stack: &mut ItemStack) -> bool {

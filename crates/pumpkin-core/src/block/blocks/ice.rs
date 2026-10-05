@@ -68,7 +68,9 @@ impl BlockBehaviour for IceBlock {
             let held_item = args.player.inventory().held_item();
             let has_silk_touch = held_item.get_enchantment_level(&Enchantment::SILK_TOUCH) > 0;
             if !has_silk_touch {
-                if args.world.dimension.water_evaporates {
+                if args.world.dimension.water_evaporates
+                    || args.player.gamemode.load() == pumpkin_util::GameMode::Creative
+                {
                     args.world.set_block_state(
                         args.position,
                         BlockStateId::AIR,

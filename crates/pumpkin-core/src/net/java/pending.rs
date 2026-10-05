@@ -189,9 +189,11 @@ impl PendingConnection {
     /// Encoded as 26.3. `ConnectionPacketSentEvent` can rewrite it.
     pub async fn send_packet_now<P: ClientPacket>(&mut self, packet: &P) {
         let mut packet_buf = Vec::new();
-        if let Err(err) =
-            JavaClient::write_packet_for_version(packet, CURRENT_MC_VERSION, &mut packet_buf)
-        {
+        if let Err(err) = JavaClient::write_packet_for_version(
+            packet,
+            crate::net::java::packet_version_for(self.version.load()),
+            &mut packet_buf,
+        ) {
             error!("Failed to write packet: {err:?}");
             return;
         }
@@ -384,7 +386,7 @@ impl PendingConnection {
     ) -> Result<Option<PacketHandlerResult>, ReadingError> {
         debug!("Handling status group");
         let mut payload = &packet.payload[..];
-        let version = CURRENT_MC_VERSION;
+        let version = crate::net::java::packet_version_for(self.version.load());
 
         match packet.id {
             id if id == pumpkin_protocol::java::server::status::SStatusRequest::to_id(version) => {
@@ -417,7 +419,7 @@ impl PendingConnection {
     ) -> Result<Option<PacketHandlerResult>, ReadingError> {
         debug!("Handling login group");
         let mut payload = &packet.payload[..];
-        let version = CURRENT_MC_VERSION;
+        let version = crate::net::java::packet_version_for(self.version.load());
 
         match packet.id {
             id if id == pumpkin_protocol::java::server::login::SLoginStart::to_id(version) => {
@@ -487,7 +489,7 @@ impl PendingConnection {
     ) -> Result<Option<PacketHandlerResult>, ReadingError> {
         debug!("Handling config group");
         let mut payload = &packet.payload[..];
-        let version = CURRENT_MC_VERSION;
+        let version = crate::net::java::packet_version_for(self.version.load());
 
         match packet.id {
             id if id == SClientInformationConfig::to_id(version) => {

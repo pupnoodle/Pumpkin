@@ -10,8 +10,8 @@ use crate::{
     world::World,
 };
 use pumpkin_data::{
-    Block, BlockStateId, block_properties::NetherWartLikeProperties, damage::DamageType,
-    entity::EntityType, item::Item, item_stack::ItemStack,
+    Block, BlockState, BlockStateId, block_properties::NetherWartLikeProperties,
+    damage::DamageType, entity::EntityType, item::Item, item_stack::ItemStack,
 };
 use pumpkin_macros::pumpkin_block;
 use pumpkin_util::math::position::BlockPos;
@@ -131,6 +131,14 @@ impl BlockBehaviour for SweetBerryBushBlock {
             <Self as CropBlockBase>::random_tick(self, args.world, args.position);
         }
     }
+
+    fn adjust_drops(&self, state: &BlockState, mut drops: Vec<ItemStack>) -> Vec<ItemStack> {
+        let age = NetherWartLikeProperties::from_state_id(state.id).age;
+        if age < 2 {
+            drops.retain(|stack| stack.item.id != Item::SWEET_BERRIES.id);
+        }
+        drops
+    }
 }
 
 impl PlantBlockBase for SweetBerryBushBlock {
@@ -186,5 +194,62 @@ impl CropBlockBase for SweetBerryBushBlock {
                 BlockFlags::NOTIFY_NEIGHBORS,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pumpkin_data::BlockState;
+    use pumpkin_data::item::Item;
+    use pumpkin_data::item_stack::ItemStack;
+
+    fn state_for_age(age: u8) -> &'static BlockState {
+        let mut props = NetherWartLikeProperties::default(&Block::SWEET_BERRY_BUSH);
+        props.age = age;
+        BlockState::from_id(props.to_state_id(&Block::SWEET_BERRY_BUSH))
+    }
+
+    fn count(drops: &[ItemStack]) -> u32 {
+        drops
+            .iter()
+            .filter(|stack| stack.item.id == Item::SWEET_BERRIES.id)
+            .map(|stack| u32::from(stack.item_count))
+            .sum()
+    }
+
+    #[test]
+    fn age_zero_break_does_not_return_two_berries() {
+        let drops = SweetBerryBushBlock.adjust_drops(
+            state_for_age(0),
+            vec![
+                ItemStack::new(1, &Item::SWEET_BERRIES),
+                ItemStack::new(1, &Item::SWEET_BERRIES),
+            ],
+        );
+        assert_eq!(count(&drops), 0);
+    }
+
+    #[test]
+    fn age_one_break_drops_no_berries() {
+        let drops = SweetBerryBushBlock.adjust_drops(
+            state_for_age(1),
+            vec![ItemStack::new(1, &Item::SWEET_BERRIES)],
+        );
+        assert_eq!(count(&drops), 0);
+    }
+
+    #[test]
+    fn grown_bushes_still_drop_berries() {
+        let age_two = SweetBerryBushBlock.adjust_drops(
+            state_for_age(2),
+            vec![ItemStack::new(1, &Item::SWEET_BERRIES)],
+        );
+        let age_three = SweetBerryBushBlock.adjust_drops(
+            state_for_age(3),
+            vec![ItemStack::new(2, &Item::SWEET_BERRIES)],
+        );
+        assert_eq!(count(&age_two), 1);
+        assert_eq!(count(&age_three), 2);
     }
 }

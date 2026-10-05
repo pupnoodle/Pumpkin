@@ -1350,6 +1350,101 @@ fn serialize_item_stack_template(
     Ok(())
 }
 
+fn write_network_slot(
+    stack: Option<&pumpkin_data::item_stack::ItemStack>,
+    seq: &mut impl NetworkWriteExt,
+) -> Result<(), WritingError> {
+    let Some(stack) = stack.filter(|stack| !stack.is_empty()) else {
+        return seq.write_var_int(&VarInt(0));
+    };
+
+    let mut to_add = 0i32;
+    let mut to_remove = 0i32;
+    for (_, data) in &stack.patch {
+        if data.is_none() {
+            to_remove += 1;
+        } else {
+            to_add += 1;
+        }
+    }
+
+    seq.write_var_int(&VarInt::from(stack.item_count))?;
+    seq.write_var_int(&VarInt::from(stack.item.id))?;
+    seq.write_var_int(&VarInt(to_add))?;
+    seq.write_var_int(&VarInt(to_remove))?;
+
+    for (id, data) in &stack.patch {
+        if let Some(data) = data {
+            seq.write_var_int(&VarInt::from(id.to_id()))?;
+            serialize(*id, data.as_ref(), seq)?;
+        }
+    }
+
+    for (id, data) in &stack.patch {
+        if data.is_none() {
+            seq.write_var_int(&VarInt::from(id.to_id()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn read_network_slot(
+    seq: &mut impl NetworkReadExt,
+) -> Result<pumpkin_data::item_stack::ItemStack, ReadingError> {
+    const MAX_COMPONENTS: i32 = 256;
+
+    let item_count = seq.get_var_int()?.0;
+    if item_count == 0 {
+        return Ok(pumpkin_data::item_stack::ItemStack::EMPTY.clone());
+    }
+
+    let item_id = seq.get_var_int()?.0;
+    let num_to_add = seq.get_var_int()?.0;
+    let num_to_remove = seq.get_var_int()?.0;
+    if num_to_add < 0 || num_to_remove < 0 {
+        return Err(ReadingError::Message("Negative component count".into()));
+    }
+    let total_components = num_to_add
+        .checked_add(num_to_remove)
+        .ok_or_else(|| ReadingError::Message("Component count overflow".into()))?;
+    if total_components > MAX_COMPONENTS {
+        return Err(ReadingError::Message(
+            "Too many components in ItemStack patch".into(),
+        ));
+    }
+    let total_components = usize::try_from(total_components)
+        .map_err(|_| ReadingError::Message("Component count overflow".into()))?;
+
+    let mut patch = Vec::with_capacity(total_components);
+    for _ in 0..num_to_add {
+        let id_val = seq.get_var_int()?.0;
+        let id_u8 = u8::try_from(id_val)
+            .map_err(|_| ReadingError::Message(format!("Invalid component ID: {id_val}")))?;
+        let id = DataComponent::try_from_id(id_u8)
+            .ok_or_else(|| ReadingError::Message(format!("Unknown component ID: {id_val}")))?;
+        patch.push((id, Some(deserialize(id, seq)?)));
+    }
+    for _ in 0..num_to_remove {
+        let id_val = seq.get_var_int()?.0;
+        let id_u8 = u8::try_from(id_val)
+            .map_err(|_| ReadingError::Message(format!("Invalid component ID: {id_val}")))?;
+        let id = DataComponent::try_from_id(id_u8)
+            .ok_or_else(|| ReadingError::Message("Unknown component ID".into()))?;
+        patch.push((id, None));
+    }
+
+    let count =
+        u8::try_from(item_count).map_err(|_| ReadingError::Message("Invalid item count".into()))?;
+    let item_id =
+        u16::try_from(item_id).map_err(|_| ReadingError::Message("Invalid item id".into()))?;
+    Ok(pumpkin_data::item_stack::ItemStack::new_with_component(
+        count,
+        pumpkin_data::item::Item::from_id(item_id).unwrap_or(&pumpkin_data::item::Item::AIR),
+        patch,
+    ))
+}
+
 impl DataComponentCodec<Self> for BundleContentsImpl {
     fn serialize(&self, seq: &mut impl NetworkWriteExt) -> Result<(), WritingError> {
         seq.write_var_int(&VarInt::from(self.items.len() as i32))?;
@@ -1727,11 +1822,12 @@ impl DataComponentCodec<Self> for EnchantmentGlintOverrideImpl {
 }
 
 impl DataComponentCodec<Self> for IntangibleProjectileImpl {
-    fn serialize(&self, _seq: &mut impl NetworkWriteExt) -> Result<(), WritingError> {
-        Ok(())
+    fn serialize(&self, seq: &mut impl NetworkWriteExt) -> Result<(), WritingError> {
+        seq.write_nbt(NbtTag::Compound(pumpkin_nbt::compound::NbtCompound::new()))
     }
 
-    fn deserialize(_seq: &mut impl NetworkReadExt) -> Result<Self, ReadingError> {
+    fn deserialize(seq: &mut impl NetworkReadExt) -> Result<Self, ReadingError> {
+        let _ = seq.get_nbt_with_version(&JavaMinecraftVersion::V_26_3)?;
         Ok(Self)
     }
 }
@@ -2214,22 +2310,33 @@ impl DataComponentCodec<Self> for MapPostProcessingImpl {
 
 impl DataComponentCodec<Self> for ChargedProjectilesImpl {
     fn serialize(&self, seq: &mut impl NetworkWriteExt) -> Result<(), WritingError> {
-        seq.write_var_int(&VarInt::from(self.projectiles.len() as i32))?;
-        for _ in &self.projectiles {
-            seq.write_var_int(&VarInt(0))?;
-            seq.write_var_int(&VarInt(0))?;
-            seq.write_var_int(&VarInt(0))?;
-            seq.write_var_int(&VarInt(0))?;
+        let len = i32::try_from(self.projectiles.len())
+            .map_err(|_| WritingError::Message("Too many charged projectiles".into()))?;
+        seq.write_var_int(&VarInt(len))?;
+        for projectile in &self.projectiles {
+            let stack = pumpkin_data::item_stack::ItemStack::read_item_stack(projectile);
+            write_network_slot(stack.as_ref(), seq)?;
         }
         Ok(())
     }
 
     fn deserialize(seq: &mut impl NetworkReadExt) -> Result<Self, ReadingError> {
-        let len = seq.get_var_int()?.0 as usize;
-        let mut projectiles = Vec::with_capacity(len);
-        for _ in 0..len {
-            let _ = deserialize_item_stack_template(seq)?;
-            projectiles.push(pumpkin_nbt::compound::NbtCompound::new());
+        const MAX_PROJECTILES: i32 = 64;
+
+        let len = seq.get_var_int()?.0;
+        if !(0..=MAX_PROJECTILES).contains(&len) {
+            return Err(ReadingError::Message("Too many charged projectiles".into()));
+        }
+        let len_usize = usize::try_from(len)
+            .map_err(|_| ReadingError::Message("Too many charged projectiles".into()))?;
+        let mut projectiles = Vec::with_capacity(len_usize);
+        for _ in 0..len_usize {
+            let stack = read_network_slot(seq)?;
+            let mut nbt = pumpkin_nbt::compound::NbtCompound::new();
+            if !stack.is_empty() {
+                stack.write_item_stack(&mut nbt);
+            }
+            projectiles.push(nbt);
         }
         Ok(Self { projectiles })
     }

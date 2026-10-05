@@ -6,6 +6,7 @@ use pumpkin_data::{
     fluid::Fluid,
 };
 use pumpkin_util::encompassing_bits;
+use rustc_hash::FxHashMap;
 use tracing::warn;
 
 use super::format::{ChunkSectionBiomes, ChunkSectionBlockStates};
@@ -169,14 +170,16 @@ impl<V: Hash + Eq + Copy + Default, const DIM: usize> PalettedContainer<V, DIM> 
     fn from_cube(cube: Box<AbstractCube<V, DIM>>) -> Self {
         let mut palette: Vec<V> = Vec::new();
         let mut counts: Vec<u16> = Vec::new();
+        let mut value_to_index: FxHashMap<V, usize> = FxHashMap::default();
 
         // Iterate over the flattened cube to populate the palette and counts
         for val in cube.as_flattened().as_flattened() {
-            if let Some(index) = palette.iter().position(|v| v == val) {
+            if let Some(index) = value_to_index.get(val).copied() {
                 // Value already exists, increment its count
                 counts[index] += 1;
             } else {
                 // New value, add it to the palette and start its count
+                value_to_index.insert(*val, palette.len());
                 palette.push(*val);
                 counts.push(1);
             }
@@ -189,9 +192,10 @@ impl<V: Hash + Eq + Copy + Default, const DIM: usize> PalettedContainer<V, DIM> 
             // Heterogeneous cube, store the full data
             if palette.len() <= 256 && std::mem::size_of::<V>() > 1 {
                 let mut indices = Box::new([[[0u8; DIM]; DIM]; DIM]);
-                for (i, v) in cube.as_flattened().as_flattened().iter().enumerate() {
-                    let idx = palette.iter().position(|p| p == v).unwrap_or(0);
-                    indices.as_flattened_mut().as_flattened_mut()[i] = idx as u8;
+                let indices_flat = indices.as_flattened_mut().as_flattened_mut();
+                for (i, val) in cube.as_flattened().as_flattened().iter().enumerate() {
+                    let idx = value_to_index.get(val).copied().unwrap_or(0);
+                    indices_flat[i] = idx as u8;
                 }
                 Self::Heterogeneous(Box::new(HeterogeneousPaletteData {
                     storage: PaletteStorage::Indexed(indices),
@@ -214,21 +218,22 @@ impl<V: Hash + Eq + Copy + Default, const DIM: usize> PalettedContainer<V, DIM> 
         let mut indices = Box::new([[[0u8; DIM]; DIM]; DIM]);
         let mut palette = Vec::new();
         let mut counts = Vec::<u16>::new();
+        let mut value_to_index: FxHashMap<V, usize> = FxHashMap::default();
 
         for y in 0..DIM {
             for z in 0..DIM {
                 for x in 0..DIM {
                     let value = value_at(x, y, z);
                     cube[y][z][x] = value;
-                    let index =
-                        if let Some(index) = palette.iter().position(|entry| *entry == value) {
-                            counts[index] += 1;
-                            index
-                        } else {
-                            palette.push(value);
-                            counts.push(1);
-                            palette.len() - 1
-                        };
+                    let index = if let Some(index) = value_to_index.get(&value).copied() {
+                        counts[index] += 1;
+                        index
+                    } else {
+                        value_to_index.insert(value, palette.len());
+                        palette.push(value);
+                        counts.push(1);
+                        palette.len() - 1
+                    };
                     if let Ok(index) = u8::try_from(index) {
                         indices[y][z][x] = index;
                     }
@@ -266,26 +271,51 @@ impl<V: Hash + Eq + Copy + Default, const DIM: usize> PalettedContainer<V, DIM> 
                 debug_assert!(bits_per_entry >= encompassing_bits(data.counts.len()));
                 debug_assert!(bits_per_entry <= 15);
 
-                // Don't use HashMap's here, because its slow
                 let blocks_per_i64 = 64 / bits_per_entry;
 
+                // Resolve each block to its palette index once: a linear
+                // palette scan per block makes packing O(volume * palette),
+                // which dominates section serialization for large palettes.
+                // Small palettes stay linear, where the scan is cheaper
+                // than hashing.
                 let packed_indices: Box<[i64]> = match &data.storage {
-                    PaletteStorage::Dense(cube) => cube
-                        .as_flattened()
-                        .as_flattened()
-                        .chunks(blocks_per_i64 as usize)
-                        .map(|chunk| {
-                            chunk.iter().enumerate().fold(0, |acc, (index, key)| {
-                                let key_index =
-                                    data.palette.iter().position(|&x| x == *key).unwrap_or(0);
-                                debug_assert!((1 << bits_per_entry) > key_index);
+                    PaletteStorage::Dense(cube) => {
+                        let flat = cube.as_flattened().as_flattened();
+                        let block_indices: Vec<u16> = if data.palette.len() <= 8 {
+                            flat.iter()
+                                .map(|key| {
+                                    data.palette.iter().position(|&x| x == *key).unwrap_or(0) as u16
+                                })
+                                .collect()
+                        } else {
+                            let key_to_index: FxHashMap<V, u16> = data
+                                .palette
+                                .iter()
+                                .enumerate()
+                                .map(|(index, key)| (*key, index as u16))
+                                .collect();
+                            flat.iter()
+                                .map(|key| key_to_index.get(key).copied().unwrap_or(0))
+                                .collect()
+                        };
 
-                                let packed_offset_index =
-                                    (key_index as u64) << (bits_per_entry as u64 * index as u64);
-                                acc | packed_offset_index as i64
+                        block_indices
+                            .chunks(blocks_per_i64 as usize)
+                            .map(|chunk| {
+                                chunk
+                                    .iter()
+                                    .enumerate()
+                                    .fold(0, |acc, (index, &key_index)| {
+                                        let key_index = key_index as usize;
+                                        debug_assert!((1 << bits_per_entry) > key_index);
+
+                                        let packed_offset_index = (key_index as u64)
+                                            << (bits_per_entry as u64 * index as u64);
+                                        acc | packed_offset_index as i64
+                                    })
                             })
-                        })
-                        .collect(),
+                            .collect()
+                    }
                     PaletteStorage::Indexed(indices) => indices
                         .as_flattened()
                         .as_flattened()
@@ -394,11 +424,16 @@ impl<V: Hash + Eq + Copy + Default, const DIM: usize> PalettedContainer<V, DIM> 
 
         // Now, with all decompressed values, build the counts.
         let mut counts = vec![0; palette.len()];
+        let value_to_index: FxHashMap<V, usize> = palette
+            .iter()
+            .enumerate()
+            .map(|(index, value)| (*value, index))
+            .collect();
 
         for &value in &decompressed_values {
-            // This is the key optimization: find the index in the palette Vec
-            // and increment the corresponding count.
-            if let Some(index) = palette.iter().position(|v| v == &value) {
+            // Look up the value's palette index and increment the
+            // corresponding count.
+            if let Some(index) = value_to_index.get(&value).copied() {
                 counts[index] += 1;
             } else {
                 // This case should ideally not happen if the palette is complete.

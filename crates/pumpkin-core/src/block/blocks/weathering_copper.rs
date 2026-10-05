@@ -793,8 +793,48 @@ impl BlockBehaviour for WeatheringCopperTrapDoorBlock {
         change_over_time(args.world, args.position, args.block);
     }
 
+    fn on_state_replaced(&self, args: OnStateReplacedArgs<'_>) {
+        if args.moved {
+            return;
+        }
+        let new_state_id = args.world.get_block_state_id(args.position);
+        if let Some(preserved) =
+            corrected_waxed_trapdoor_state(args.block, args.old_state_id, new_state_id)
+        {
+            args.world
+                .set_block_state(args.position, preserved, BlockFlags::NOTIFY_ALL);
+        }
+    }
+
     fn is_pathfindable(&self, state: &BlockState, computation_type: PathComputationType) -> bool {
         TrapDoorBlock.is_pathfindable(state, computation_type)
+    }
+}
+
+fn waxed_copper_trapdoor(block: &Block) -> Option<&'static Block> {
+    match block.id {
+        BlockId::COPPER_TRAPDOOR => Some(&Block::WAXED_COPPER_TRAPDOOR),
+        BlockId::EXPOSED_COPPER_TRAPDOOR => Some(&Block::WAXED_EXPOSED_COPPER_TRAPDOOR),
+        BlockId::WEATHERED_COPPER_TRAPDOOR => Some(&Block::WAXED_WEATHERED_COPPER_TRAPDOOR),
+        BlockId::OXIDIZED_COPPER_TRAPDOOR => Some(&Block::WAXED_OXIDIZED_COPPER_TRAPDOOR),
+        _ => None,
+    }
+}
+
+fn corrected_waxed_trapdoor_state(
+    old_block: &Block,
+    old_state_id: BlockStateId,
+    new_state_id: BlockStateId,
+) -> Option<BlockStateId> {
+    let waxed = waxed_copper_trapdoor(old_block)?;
+    if Block::from_state_id(new_state_id) != waxed || new_state_id != waxed.default_state.id {
+        return None;
+    }
+    let preserved = with_properties_of(old_block, old_state_id, waxed);
+    if preserved == new_state_id {
+        None
+    } else {
+        Some(preserved)
     }
 }
 
@@ -994,5 +1034,77 @@ impl BlockBehaviour for WeatheringCopperGrateBlock {
 
     fn random_tick(&self, args: RandomTickArgs<'_>) {
         change_over_time(args.world, args.position, args.block);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::block_properties::{Half, HorizontalFacing, OakTrapdoorLikeProperties};
+    use pumpkin_data::{Block, BlockStateId};
+
+    use super::corrected_waxed_trapdoor_state;
+
+    fn open_top_trapdoor(block: &Block) -> BlockStateId {
+        let mut props = OakTrapdoorLikeProperties::default(block);
+        props.facing = HorizontalFacing::West;
+        props.half = Half::Top;
+        props.open = true;
+        props.powered = true;
+        props.waterlogged = true;
+        props.to_state_id(block)
+    }
+
+    #[test]
+    fn waxing_keeps_facing_half_open_and_powered() {
+        let pairs = [
+            (&Block::COPPER_TRAPDOOR, &Block::WAXED_COPPER_TRAPDOOR),
+            (
+                &Block::EXPOSED_COPPER_TRAPDOOR,
+                &Block::WAXED_EXPOSED_COPPER_TRAPDOOR,
+            ),
+            (
+                &Block::WEATHERED_COPPER_TRAPDOOR,
+                &Block::WAXED_WEATHERED_COPPER_TRAPDOOR,
+            ),
+            (
+                &Block::OXIDIZED_COPPER_TRAPDOOR,
+                &Block::WAXED_OXIDIZED_COPPER_TRAPDOOR,
+            ),
+        ];
+        for (block, waxed) in pairs {
+            let old = open_top_trapdoor(block);
+            let corrected = corrected_waxed_trapdoor_state(block, old, waxed.default_state.id);
+            let Some(corrected) = corrected else {
+                panic!("default waxed state should keep the unwaxed properties");
+            };
+            assert_eq!(Block::from_state_id(corrected), waxed);
+            let props = OakTrapdoorLikeProperties::from_state_id(corrected);
+            assert_eq!(props.facing, HorizontalFacing::West);
+            assert_eq!(props.half, Half::Top);
+            assert!(props.open);
+            assert!(props.powered);
+            assert!(props.waterlogged);
+            assert_ne!(corrected, waxed.default_state.id);
+        }
+    }
+
+    #[test]
+    fn explicit_waxed_state_is_left_alone() {
+        let block = &Block::COPPER_TRAPDOOR;
+        let waxed = &Block::WAXED_COPPER_TRAPDOOR;
+        let explicit = open_top_trapdoor(waxed);
+        assert!(
+            corrected_waxed_trapdoor_state(block, open_top_trapdoor(block), explicit).is_none()
+        );
+    }
+
+    #[test]
+    fn default_trapdoor_waxed_to_default_needs_no_rewrite() {
+        let block = &Block::COPPER_TRAPDOOR;
+        let waxed = &Block::WAXED_COPPER_TRAPDOOR;
+        assert!(
+            corrected_waxed_trapdoor_state(block, block.default_state.id, waxed.default_state.id)
+                .is_none()
+        );
     }
 }

@@ -46,6 +46,20 @@ use crate::entity::{
 const SPEED_BOOST: f64 = 0.15;
 const ENDERMAN_SPEED_BOOST_ID: &str = "minecraft:attacking";
 
+const fn should_drop_anger_target(target_present: bool, target_living: bool) -> bool {
+    !target_present || !target_living
+}
+
+fn anger_target_is_living(target: &dyn EntityBase) -> bool {
+    if !target.get_entity().is_alive() {
+        return false;
+    }
+    let Some(living) = target.get_living_entity() else {
+        return false;
+    };
+    living.health.load() > 0.0 && !living.dead.load(Ordering::Relaxed)
+}
+
 pub const ENDERMAN_EYE_HEIGHT: f64 = 2.55;
 pub const ENDERMAN_BODY_Y_OFFSET: f64 = 1.45;
 pub const PLAYER_EYE_HEIGHT: f64 = 1.62;
@@ -249,6 +263,7 @@ impl EndermanEntity {
     }
 
     pub fn set_target(&self, target: Option<Arc<dyn EntityBase>>) {
+        let target = target.filter(|target| anger_target_is_living(target.as_ref()));
         let is_some = target.is_some();
         let mut mob_target = self
             .mob_entity
@@ -386,6 +401,19 @@ impl EndermanEntity {
             })
             .is_none()
     }
+
+    fn drop_invalid_anger_target(&self) {
+        if !self.is_angry() && self.get_persistent_anger_target().is_none() {
+            return;
+        }
+        let target = self.mob_entity.get_target();
+        let target_living = target
+            .as_ref()
+            .is_some_and(|target| anger_target_is_living(target.as_ref()));
+        if should_drop_anger_target(target.is_some(), target_living) {
+            self.stop_being_angry();
+        }
+    }
 }
 
 impl NeutralMob for EndermanEntity {
@@ -397,6 +425,10 @@ impl NeutralMob for EndermanEntity {
 impl Mob for EndermanEntity {
     fn as_neutral(&self) -> Option<&dyn NeutralMob> {
         Some(self)
+    }
+
+    fn is_sensitive_to_water(&self) -> bool {
+        true
     }
 
     fn mob_write_nbt(&self, nbt: &mut NbtCompound) {
@@ -432,6 +464,8 @@ impl Mob for EndermanEntity {
         if entity.touching_water.load(Ordering::SeqCst) || raining_at_feet || raining_at_head {
             caller.damage(caller, 1.0, DamageType::DROWN);
         }
+
+        self.drop_invalid_anger_target();
     }
 
     fn pre_damage(&self, damage_type: DamageType, _source: Option<&dyn EntityBase>) -> bool {
@@ -454,5 +488,17 @@ impl Mob for EndermanEntity {
         if should_teleport {
             self.teleport_randomly();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_drop_anger_target;
+
+    #[test]
+    fn angry_enderman_drops_a_dead_or_missing_target_only() {
+        assert!(!should_drop_anger_target(true, true));
+        assert!(should_drop_anger_target(true, false));
+        assert!(should_drop_anger_target(false, false));
     }
 }

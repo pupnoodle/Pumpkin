@@ -6,7 +6,7 @@ use crate::block::{
 };
 use pumpkin_data::{
     Block, BlockDirection, BlockStateId, HorizontalFacingExt,
-    block_properties::{AttachFace, LeverLikeProperties},
+    block_properties::{AttachFace, HorizontalFacing, LeverLikeProperties},
     game_event::GameEvent,
     sound::{Sound, SoundCategory},
 };
@@ -14,6 +14,7 @@ use pumpkin_macros::pumpkin_block;
 use pumpkin_util::math::position::BlockPos;
 use pumpkin_world::world::BlockFlags;
 
+use crate::entity::EntityBase;
 use crate::{
     block::{
         registry::BlockActionResult,
@@ -61,7 +62,7 @@ pub struct LeverBlock;
 impl BlockBehaviour for LeverBlock {
     fn normal_use(&self, args: NormalUseArgs<'_>) -> BlockActionResult {
         toggle_lever(args.world, args.position);
-        BlockActionResult::Consume
+        BlockActionResult::Success
     }
 
     fn emits_redstone_power(&self, _args: EmitsRedstonePowerArgs<'_>) -> bool {
@@ -83,19 +84,18 @@ impl BlockBehaviour for LeverBlock {
     }
 
     fn on_state_replaced(&self, args: OnStateReplacedArgs<'_>) {
-        let block_pos = args.position;
-
         let lever_props = LeverLikeProperties::from_state_id(args.old_state_id);
-
-        if lever_props.powered {
-            Self::update_neighbors(args.world, block_pos, lever_props);
+        if updates_neighbors_when_replaced(args.moved, lever_props.powered) {
+            Self::update_neighbors(args.world, args.position, lever_props);
         }
     }
 
     fn on_place(&self, args: OnPlaceArgs<'_>) -> BlockStateId {
         let mut props = LeverLikeProperties::default(args.block);
-        (props.face, props.facing) =
-            WallMountedBlock::get_placement_face(self, args.player, args.direction);
+        (props.face, props.facing) = attachment(
+            args.direction,
+            args.player.get_entity().get_horizontal_facing(),
+        );
 
         props.to_state_id(args.block)
     }
@@ -151,5 +151,66 @@ impl LeverLikePropertiesExt for LeverLikeProperties {
             AttachFace::Floor => BlockDirection::Up,
             AttachFace::Wall => self.facing.to_block_direction(),
         }
+    }
+}
+
+fn attachment(
+    direction: BlockDirection,
+    player_facing: HorizontalFacing,
+) -> (AttachFace, HorizontalFacing) {
+    let face = match direction {
+        BlockDirection::Up => AttachFace::Ceiling,
+        BlockDirection::Down => AttachFace::Floor,
+        _ => AttachFace::Wall,
+    };
+    let facing = if direction == BlockDirection::Up || direction == BlockDirection::Down {
+        player_facing
+    } else {
+        direction.opposite().to_cardinal_direction()
+    };
+    (face, facing)
+}
+
+const fn updates_neighbors_when_replaced(moved: bool, powered: bool) -> bool {
+    !moved && powered
+}
+
+#[cfg(test)]
+mod tests {
+    use pumpkin_data::{
+        BlockDirection, HorizontalFacingExt,
+        block_properties::{AttachFace, HorizontalFacing},
+    };
+
+    use super::{attachment, updates_neighbors_when_replaced};
+
+    #[test]
+    fn attaches_to_the_clicked_face() {
+        for clicked in [
+            BlockDirection::North,
+            BlockDirection::South,
+            BlockDirection::East,
+            BlockDirection::West,
+        ] {
+            let (face, facing) = attachment(clicked.opposite(), HorizontalFacing::North);
+            assert_eq!(face, AttachFace::Wall);
+            assert_eq!(facing.to_block_direction(), clicked);
+        }
+
+        let (floor, floor_facing) = attachment(BlockDirection::Down, HorizontalFacing::West);
+        assert_eq!(floor, AttachFace::Floor);
+        assert_eq!(floor_facing, HorizontalFacing::West);
+
+        let (ceiling, ceiling_facing) = attachment(BlockDirection::Up, HorizontalFacing::East);
+        assert_eq!(ceiling, AttachFace::Ceiling);
+        assert_eq!(ceiling_facing, HorizontalFacing::East);
+    }
+
+    #[test]
+    fn piston_move_does_not_cut_power() {
+        assert!(!updates_neighbors_when_replaced(true, true));
+        assert!(!updates_neighbors_when_replaced(true, false));
+        assert!(updates_neighbors_when_replaced(false, true));
+        assert!(!updates_neighbors_when_replaced(false, false));
     }
 }

@@ -107,11 +107,13 @@ impl JavaClient {
         } else {
             EquipmentSlot::OFF_HAND
         };
+        let slot_index = crate::item::slot_index_for_hand(hand, inventory.get_selected_slot());
 
         let sneaking = player.get_entity().is_sneaking();
 
         // Code based on the java class ServerPlayerInteractionManager
         if !(sneaking && (!held_item_empty || !off_hand_item_empty)) {
+            let block_use_before = item.clone();
             let result = Self::call_use_item_on(
                 player,
                 &position,
@@ -129,15 +131,17 @@ impl JavaClient {
                 if matches!(result, BlockActionResult::SuccessServer) {
                     player.swing_hand(hand, true);
                 }
+                Self::finish_used_hand(
+                    player,
+                    &inventory,
+                    hand,
+                    slot_index,
+                    &block_use_before,
+                    item,
+                );
                 return Ok(());
             }
         }
-
-        let slot_index = if matches!(hand, Hand::Right) {
-            inventory.get_selected_slot() as usize
-        } else {
-            PlayerInventory::OFF_HAND_SLOT
-        };
 
         if item.is_empty() {
             // TODO item cool down
@@ -162,25 +166,32 @@ impl JavaClient {
 
         if should_try_decrement {
             // TODO: Config
-            // Decrease block count
-            if player.gamemode.load() != GameMode::Creative {
-                item.decrement(1);
-            }
+            crate::item::decrement_placed_stack(player.gamemode.load(), &mut item);
         }
-
-        let after = item.clone();
 
         if matches!(item_result, BlockActionResult::SuccessServer) {
             player.swing_hand(hand, true);
         }
 
+        Self::finish_used_hand(player, &inventory, hand, slot_index, &before, item);
+
+        Ok(())
+    }
+
+    fn finish_used_hand(
+        player: &Player,
+        inventory: &PlayerInventory,
+        hand: Hand,
+        slot_index: usize,
+        before: &ItemStack,
+        after: ItemStack,
+    ) {
         // Broadcast the break entity status before the slot sync; the client
         // needs the old item texture in the slot for break particles.
         if !before.is_empty() && after.is_empty() {
-            let slot = if slot_index == player.inventory.get_selected_slot() as usize {
-                &EquipmentSlot::MAIN_HAND
-            } else {
-                &EquipmentSlot::OFF_HAND
+            let slot = match hand {
+                Hand::Right => &EquipmentSlot::MAIN_HAND,
+                Hand::Left => &EquipmentSlot::OFF_HAND,
             };
             if before.is_damageable() {
                 player.increment_stat(StatisticCategory::Broken, before.item.id as i32, 1);
@@ -192,12 +203,9 @@ impl JavaClient {
             );
         }
 
-        if !after.are_equal(&before) {
-            player.sync_hand_slot(slot_index, after.clone());
-            inventory.set_stack_in_hand(hand, after);
+        if let Some(updated) = crate::item::store_used_hand(inventory, hand, before, after) {
+            player.sync_hand_slot(slot_index, updated);
         }
-
-        Ok(())
     }
 
     #[expect(clippy::too_many_arguments)]

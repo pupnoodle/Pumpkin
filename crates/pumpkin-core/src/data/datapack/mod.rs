@@ -8,6 +8,7 @@ pub mod structure_loader;
 pub mod test_loader;
 pub mod trade_loader;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -739,7 +740,7 @@ impl DatapackManager {
         source: &CommandSource,
         name: &str,
     ) -> Result<usize, String> {
-        self.visit_function_lines(name, |line| {
+        self.execute_function_lines(name, |line| {
             server
                 .command_dispatcher
                 .load()
@@ -747,11 +748,42 @@ impl DatapackManager {
         })
     }
 
-    fn visit_function_lines(
+    fn execute_function_lines(
         &self,
         name: &str,
         mut visit: impl FnMut(&str),
     ) -> Result<usize, String> {
+        enter_function_chain()?;
+        let result = self.walk_function_commands(name, &mut visit);
+        leave_function_chain();
+        result
+    }
+
+    fn walk_function_commands(
+        &self,
+        name: &str,
+        visit: &mut impl FnMut(&str),
+    ) -> Result<usize, String> {
+        let functions = self.function_bodies(name)?;
+        let top_level_lines: usize = functions.iter().map(|lines| lines.len()).sum();
+        let mut stack = Vec::new();
+        push_function_frames(&mut stack, functions);
+
+        while let Some((lines, index)) = next_function_line(&mut stack) {
+            consume_function_command()?;
+            if let Some(nested_name) = plain_function_invocation(&lines[index]) {
+                let nested = self.function_bodies(nested_name)?;
+                pop_finished_frames(&mut stack);
+                push_function_frames(&mut stack, nested);
+            } else {
+                visit(&lines[index]);
+            }
+        }
+
+        Ok(top_level_lines)
+    }
+
+    fn function_bodies(&self, name: &str) -> Result<Vec<Arc<[String]>>, String> {
         let (functions_to_run, is_tag) = if let Some(tag_name) = name.strip_prefix('#') {
             let tags = self
                 .function_tags
@@ -765,24 +797,30 @@ impl DatapackManager {
             (vec![name.to_string()], false)
         };
 
-        let functions = {
-            let all_fns = self
-                .functions
-                .read()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut functions = Vec::with_capacity(functions_to_run.len());
-            for fn_id in functions_to_run {
-                let Some(lines) = all_fns.get(&fn_id) else {
-                    if !is_tag {
-                        return Err(format!("Unknown function: {fn_id}"));
-                    }
-                    continue;
-                };
-                functions.push(Arc::clone(lines));
-            }
-            functions
-        };
+        let all_fns = self
+            .functions
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut functions = Vec::with_capacity(functions_to_run.len());
+        for fn_id in functions_to_run {
+            let Some(lines) = all_fns.get(&fn_id) else {
+                if !is_tag {
+                    return Err(format!("Unknown function: {fn_id}"));
+                }
+                continue;
+            };
+            functions.push(Arc::clone(lines));
+        }
+        Ok(functions)
+    }
 
+    #[cfg(test)]
+    fn visit_function_lines(
+        &self,
+        name: &str,
+        mut visit: impl FnMut(&str),
+    ) -> Result<usize, String> {
+        let functions = self.function_bodies(name)?;
         let mut total_executed = 0;
         for lines in functions {
             for line in lines.iter() {
@@ -1135,6 +1173,107 @@ impl DatapackManager {
             .datapack_manager
             .execute_function(server, &source, name)
     }
+}
+
+pub(crate) const COMMAND_CHAIN_TOO_LONG: &str = "Command chain is too long";
+const MAX_COMMAND_CHAIN_LENGTH: u32 = 65536;
+const MAX_FUNCTION_COMMAND_DEPTH: u32 = 128;
+
+#[derive(Clone, Copy)]
+struct FunctionChain {
+    depth: u32,
+    commands: u32,
+}
+
+thread_local! {
+    static FUNCTION_CHAIN: Cell<FunctionChain> = const {
+        Cell::new(FunctionChain {
+            depth: 0,
+            commands: 0,
+        })
+    };
+}
+
+struct FunctionFrame {
+    lines: Arc<[String]>,
+    index: usize,
+}
+
+fn enter_function_chain() -> Result<(), String> {
+    FUNCTION_CHAIN.with(|chain| {
+        let current = chain.get();
+        if current.depth >= MAX_FUNCTION_COMMAND_DEPTH {
+            return Err(COMMAND_CHAIN_TOO_LONG.to_string());
+        }
+        chain.set(FunctionChain {
+            depth: current.depth + 1,
+            commands: if current.depth == 0 {
+                0
+            } else {
+                current.commands
+            },
+        });
+        Ok(())
+    })
+}
+
+fn leave_function_chain() {
+    FUNCTION_CHAIN.with(|chain| {
+        let current = chain.get();
+        chain.set(FunctionChain {
+            depth: current.depth.saturating_sub(1),
+            commands: current.commands,
+        });
+    });
+}
+
+fn consume_function_command() -> Result<(), String> {
+    FUNCTION_CHAIN.with(|chain| {
+        let current = chain.get();
+        if current.commands >= MAX_COMMAND_CHAIN_LENGTH {
+            return Err(COMMAND_CHAIN_TOO_LONG.to_string());
+        }
+        chain.set(FunctionChain {
+            depth: current.depth,
+            commands: current.commands + 1,
+        });
+        Ok(())
+    })
+}
+
+fn plain_function_invocation(line: &str) -> Option<&str> {
+    let mut tokens = line.split_whitespace();
+    if tokens.next() != Some("function") {
+        return None;
+    }
+    let name = tokens.next()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    Some(name)
+}
+
+fn push_function_frames(stack: &mut Vec<FunctionFrame>, functions: Vec<Arc<[String]>>) {
+    for lines in functions.into_iter().rev() {
+        stack.push(FunctionFrame { lines, index: 0 });
+    }
+}
+
+fn pop_finished_frames(stack: &mut Vec<FunctionFrame>) {
+    while stack
+        .last()
+        .is_some_and(|frame| frame.index >= frame.lines.len())
+    {
+        stack.pop();
+    }
+}
+
+fn next_function_line(stack: &mut Vec<FunctionFrame>) -> Option<(Arc<[String]>, usize)> {
+    pop_finished_frames(stack);
+    let frame = stack.last_mut()?;
+    let index = frame.index;
+    frame.index += 1;
+    Some((Arc::clone(&frame.lines), index))
 }
 
 fn parse_structure_resource_location(resource_location: &str) -> Result<(&str, &str), String> {
@@ -1674,6 +1813,8 @@ fn load_recipes_from_dir(
 }
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::DatapackManager;
 
     #[test]
@@ -1743,6 +1884,79 @@ mod tests {
                 .expect_err("unknown function tag must fail"),
             "Unknown function tag: #test:missing"
         );
+    }
+
+    #[test]
+    fn recursive_function_chain_stops_and_parent_count_excludes_nested_lines() {
+        let manager = DatapackManager::new();
+        manager
+            .functions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "test:loop".to_string(),
+                vec!["function test:loop".to_string()].into(),
+            );
+        manager
+            .functions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "test:child".to_string(),
+                vec!["say child".to_string(), "say child-again".to_string()].into(),
+            );
+        manager
+            .functions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                "test:parent".to_string(),
+                vec!["function test:child".to_string(), "say parent".to_string()].into(),
+            );
+
+        let err = manager
+            .execute_function_lines("test:loop", |_| {})
+            .expect_err("recursive function must stop");
+        assert!(
+            err.contains("Command chain is too long"),
+            "chain error was `{err}`"
+        );
+
+        let mut visited = Vec::new();
+        let executed = manager
+            .execute_function_lines("test:parent", |line| visited.push(line.to_string()))
+            .expect("parent function");
+        assert_eq!(executed, 2);
+        assert_eq!(visited, ["say child", "say child-again", "say parent"]);
+    }
+
+    #[test]
+    fn execute_function_recursion_stops_at_depth_cap() {
+        let manager = DatapackManager::new();
+        manager
+            .functions
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert("test:again".to_string(), vec!["again".to_string()].into());
+
+        let steps = Cell::new(0u32);
+        let hit = Cell::new(false);
+        dive_until_chain_error(&manager, &steps, &hit);
+        assert!(hit.get(), "depth cap must return the chain error");
+        assert_eq!(steps.get(), 129);
+    }
+
+    fn dive_until_chain_error(manager: &DatapackManager, steps: &Cell<u32>, hit: &Cell<bool>) {
+        if steps.get() >= 200 {
+            return;
+        }
+        steps.set(steps.get() + 1);
+        if let Err(err) = manager.execute_function_lines("test:again", |_| {
+            dive_until_chain_error(manager, steps, hit);
+        }) && err.contains("Command chain is too long")
+        {
+            hit.set(true);
+        }
     }
 
     #[test]

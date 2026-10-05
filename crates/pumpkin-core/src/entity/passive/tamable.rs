@@ -10,6 +10,17 @@ use crate::entity::passive::animal::Animal;
 pub const SITTING_FLAG: u8 = 1;
 pub const TAME_FLAG: u8 = 4;
 pub const TELEPORT_WHEN_DISTANCE_IS_SQ: f64 = 144.0;
+pub const TAME_CHANCE_DENOMINATOR: u32 = 3;
+
+#[must_use]
+pub const fn tame_roll_succeeds(roll: u32) -> bool {
+    roll % TAME_CHANCE_DENOMINATOR == 0
+}
+
+#[must_use]
+pub const fn should_attempt_tame(already_tame: bool) -> bool {
+    !already_tame
+}
 
 pub struct TamableData {
     pub is_tame: AtomicBool,
@@ -157,5 +168,19 @@ pub trait TamableAnimal: Animal {
             .or_else(|| nbt.get_byte("Sitting").map(|b| b != 0))
             .unwrap_or(false);
         self.set_ordered_to_sit(sitting);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{should_attempt_tame, tame_roll_succeeds};
+
+    #[test]
+    fn tame_success_flag_is_one_of_three_and_skipped_when_tame() {
+        assert!(tame_roll_succeeds(0));
+        assert!(!tame_roll_succeeds(1));
+        assert!(!tame_roll_succeeds(2));
+        assert!(should_attempt_tame(false));
+        assert!(!should_attempt_tame(true));
     }
 }

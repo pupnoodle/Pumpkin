@@ -22,6 +22,14 @@ use crate::{
 pub struct NetherWartBlock;
 
 impl BlockBehaviour for NetherWartBlock {
+    fn is_valid_bonemeal_target(&self, args: crate::block::BonemealArgs<'_>) -> bool {
+        <Self as CropBlockBase>::is_valid_bonemeal_target(self, args.world, args.position)
+    }
+
+    fn perform_bonemeal(&self, args: crate::block::BonemealArgs<'_>) {
+        <Self as CropBlockBase>::perform_bonemeal(self, args.world, args.position);
+    }
+
     fn can_place_at(&self, args: CanPlaceAtArgs<'_>) -> bool {
         <Self as PlantBlockBase>::can_place_at(self, args.block_accessor, args.position)
     }

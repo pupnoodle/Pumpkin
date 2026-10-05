@@ -1,4 +1,5 @@
 use pumpkin_data::damage::DamageType;
+use pumpkin_data::sound::Sound;
 use pumpkin_data::tag;
 use pumpkin_util::math::vector3::Vector3;
 use std::sync::LazyLock;
@@ -38,7 +39,7 @@ pub static WIND_CHARGE_EXPLOSION_DAMAGE_CALCULATOR: LazyLock<Arc<SimpleExplosion
     LazyLock::new(|| {
         Arc::new(SimpleExplosionDamageCalculator::new(
             true,
-            false,
+            true,
             Some(1.22),
             Some(&tag::Block::MINECRAFT_BLOCKS_WIND_CHARGE_EXPLOSIONS),
         ))
@@ -49,7 +50,7 @@ pub static BREEZE_WIND_CHARGE_EXPLOSION_DAMAGE_CALCULATOR: LazyLock<
 > = LazyLock::new(|| {
     Arc::new(SimpleExplosionDamageCalculator::new(
         true,
-        false,
+        true,
         None,
         Some(&tag::Block::MINECRAFT_BLOCKS_WIND_CHARGE_EXPLOSIONS),
     ))
@@ -95,6 +96,7 @@ impl WindChargeEntity {
             power,
             crate::world::ExplosionInteraction::Trigger,
             Some(calculator),
+            Some(Sound::EntityWindChargeWindBurst),
         );
     }
 

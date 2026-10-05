@@ -136,12 +136,19 @@ impl JavaClient {
 
                 'after: {
                     if event.action == ActionType::Attack {
-                        error!(
+                        if event.entity_id == player.entity_id() {
+                            self.try_kick(&TextComponent::translate_cross(
+                                translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
+                                translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED,
+                                [],
+                            ));
+                            return;
+                        }
+                        debug!(
                             "Player id {} interacted with entity id {}, which was not found.",
                             player.entity_id(),
                             event.entity_id
                         );
-                        self.try_kick(&TextComponent::translate_cross(translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED, translation::java::MULTIPLAYER_DISCONNECT_INVALID_ENTITY_ATTACKED, []));
                     }
                 }
             }}

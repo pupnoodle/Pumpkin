@@ -45,7 +45,7 @@ use pumpkin_data::data_component_impl::{
     EquipmentSlot, EquippableImpl, FoodImpl,
 };
 use pumpkin_data::effect::StatusEffect;
-use pumpkin_data::entity::{EntityPose, EntityStatus, EntityType};
+use pumpkin_data::entity::{EntityPose, EntityStatus, EntityType, MobCategory};
 use pumpkin_data::fluid::Fluid;
 use pumpkin_data::game_rules::{GameRule, GameRuleValue};
 use pumpkin_data::item_stack::{DamageResult, ItemStack};
@@ -241,6 +241,18 @@ impl LivingEntity {
 
     fn death_sound_for_entity(entity_type: &'static EntityType) -> Sound {
         entity_type.death_sound.unwrap_or(Sound::EntityGenericDeath)
+    }
+
+    fn sound_category_for_entity(entity_type: &'static EntityType) -> SoundCategory {
+        if entity_type == &EntityType::PLAYER {
+            SoundCategory::Players
+        } else if entity_type.category == &MobCategory::MONSTER {
+            SoundCategory::Hostile
+        } else if entity_type.category == &MobCategory::AMBIENT {
+            SoundCategory::Ambient
+        } else {
+            SoundCategory::Neutral
+        }
     }
 
     fn get_pitch(&self) -> f32 {
@@ -1438,20 +1450,30 @@ impl LivingEntity {
         let world = self.entity.world.load();
         let entity_bb = self.entity.bounding_box.load();
         let own_team = dyn_self.get_team();
+        let own_entity_id = self.entity.entity_id;
 
-        let pushable: Vec<Arc<dyn EntityBase>> = world
-            .get_all_at_box(&entity_bb)
-            .into_iter()
-            .filter(|entity| {
-                let entity_ref = entity.get_entity();
-                entity_ref.entity_id != self.entity.entity_id
-                    && !entity.is_spectator()
-                    && entity.is_pushable()
-                    && is_allowed_by_team_rules(own_team.as_ref(), entity.get_team().as_ref())
-            })
-            .collect();
+        let is_pushable = |entity: &dyn EntityBase| {
+            let entity_ref = entity.get_entity();
+            entity_ref.entity_id != own_entity_id
+                && !entity.is_spectator()
+                && entity.is_pushable()
+                && is_allowed_by_team_rules(own_team.as_ref(), entity.get_team().as_ref())
+        };
 
-        if pushable.is_empty() {
+        // Count without cloning the entity list: `get_all_at_box`
+        // clones every entity Arc per living entity per tick.
+        let mut pushable = 0;
+        let mut pushable_non_passengers = 0;
+        world.for_each_at_box(&entity_bb, |entity| {
+            if is_pushable(entity) {
+                pushable += 1;
+                if !entity.is_passenger() {
+                    pushable_non_passengers += 1;
+                }
+            }
+        });
+
+        if pushable == 0 {
             return;
         }
 
@@ -1461,21 +1483,18 @@ impl LivingEntity {
             GameRuleValue::Bool(_) => 0,
         };
         if max_cramming > 0
-            && pushable.len() as i64 > max_cramming - 1
+            && pushable as i64 > max_cramming - 1
             && rand::random::<u32>().is_multiple_of(4)
+            && pushable_non_passengers as i64 > max_cramming - 1
         {
-            let count = pushable
-                .iter()
-                .filter(|entity| !entity.is_passenger())
-                .count();
-            if count as i64 > max_cramming - 1 {
-                dyn_self.damage(dyn_self, 6.0, DamageType::CRAMMING);
-            }
+            dyn_self.damage(dyn_self, 6.0, DamageType::CRAMMING);
         }
 
-        for entity in pushable {
-            entity.push(dyn_self);
-        }
+        world.for_each_at_box(&entity_bb, |entity| {
+            if is_pushable(entity) {
+                entity.push(dyn_self);
+            }
+        });
     }
 
     /// Decays player velocity like vanilla `travelInAir` friction.
@@ -2018,7 +2037,7 @@ impl LivingEntity {
             // Plays the death sound
             world.play_sound_fine(
                 self.death_sound(&*dyn_self),
-                SoundCategory::Players,
+                Self::sound_category_for_entity(self.entity.entity_type),
                 &self.entity.pos.load(),
                 1.0,
                 self.get_pitch(),
@@ -2298,6 +2317,7 @@ impl LivingEntity {
             let seed: i64 = rand::random();
             let pos = self.entity.block_pos.load();
             for stack in crate::world::loot::generate_loot_from_handle(&loot_table, seed, params) {
+                let stack = crate::world::loot::apply_furnace_smelt_to_drop(stack, params);
                 world.drop_stack(&pos, stack);
             }
         }
@@ -2561,7 +2581,11 @@ impl LivingEntity {
     }
 
     pub fn is_part_of_game(&self) -> bool {
-        !self.is_spectator() && self.entity.is_alive()
+        !self.is_spectator() && self.is_alive()
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.entity.is_alive() && self.health.load() > 0.0
     }
 
     pub fn can_attack(&self, target: &dyn EntityBase) -> bool {
@@ -3040,14 +3064,12 @@ impl LivingEntity {
         // Check for shield blocking before armor/magic/cooldown
         if self.is_blocking()
             && !damage_type.has_tag(&tag::DamageType::MINECRAFT_BYPASSES_SHIELD)
-            && let Some(pos) = position
+            && let Some(pos) =
+                position.or_else(|| source.map(|attacker| attacker.get_entity().pos.load()))
         {
             let player_pos = self.entity.pos.load();
-            let look_vec = Vector3::rotation_vector(0.0, self.entity.yaw.load() as f64);
-            let mut source_to_player = (player_pos - pos).normalize();
-            source_to_player.y = 0.0;
-
-            if source_to_player.dot(&look_vec) < 0.0 {
+            if crate::entity::combat::shield_blocks_facing(player_pos, self.entity.yaw.load(), pos)
+            {
                 world.play_sound(Sound::ItemShieldBlock, SoundCategory::Players, &player_pos);
 
                 if let Some(player) = caller.get_player() {
@@ -3185,7 +3207,7 @@ impl LivingEntity {
         if play_sound {
             world.play_sound_fine(
                 self.hurt_sound(caller),
-                SoundCategory::Players,
+                Self::sound_category_for_entity(self.entity.entity_type),
                 &self.entity.pos.load(),
                 1.0,
                 self.get_pitch(),
@@ -4028,6 +4050,25 @@ mod tests {
             LivingEntity::hurt_sound_for_entity(&EntityType::ITEM),
             Sound::EntityGenericHurt
         );
+    }
+
+    #[test]
+    fn sound_category_for_entity_follows_type_and_mob_category() {
+        let cases = [
+            (&EntityType::PLAYER, SoundCategory::Players),
+            (&EntityType::ZOMBIE, SoundCategory::Hostile),
+            (&EntityType::BAT, SoundCategory::Ambient),
+            (&EntityType::COW, SoundCategory::Neutral),
+        ];
+
+        for (entity_type, expected) in cases {
+            assert_eq!(
+                LivingEntity::sound_category_for_entity(entity_type).to_name(),
+                expected.to_name(),
+                "{}",
+                entity_type.resource_name
+            );
+        }
     }
 
     #[test]

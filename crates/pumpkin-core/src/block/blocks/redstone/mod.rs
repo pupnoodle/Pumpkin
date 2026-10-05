@@ -79,12 +79,39 @@ pub fn get_redstone_power_no_dust(
 pub fn get_max_strong_power(world: &World, pos: &BlockPos, dust_power: bool) -> u8 {
     let mut max_power = 0;
     for side in BlockDirection::all() {
-        let (block, state) = world.get_block_and_state(&pos.offset(side.to_offset()));
+        let neighbor_pos = pos.offset(side.to_offset());
+        let (block, state) = world.get_block_and_state(&neighbor_pos);
         max_power = max_power.max(get_strong_power(
             block,
             state,
             world,
-            &pos.offset(side.to_offset()),
+            &neighbor_pos,
+            side,
+            dust_power,
+        ));
+    }
+    max_power
+}
+
+/// Like [`get_max_strong_power`], but ignores the given direction.
+pub fn get_max_strong_power_except(
+    world: &World,
+    pos: &BlockPos,
+    except: BlockDirection,
+    dust_power: bool,
+) -> u8 {
+    let mut max_power = 0;
+    for side in BlockDirection::all() {
+        if side == except {
+            continue;
+        }
+        let neighbor_pos = pos.offset(side.to_offset());
+        let (block, state) = world.get_block_and_state(&neighbor_pos);
+        max_power = max_power.max(get_strong_power(
+            block,
+            state,
+            world,
+            &neighbor_pos,
             side,
             dust_power,
         ));

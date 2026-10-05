@@ -26,6 +26,7 @@ use std::sync::{
 use crate::screen_handler::InventoryPlayer;
 
 use crate::inventory::Inventory;
+use pumpkin_data::Enchantment;
 use pumpkin_data::data_component_impl::EquipmentSlot;
 use pumpkin_data::item::Item;
 use pumpkin_data::item_stack::ItemStack;
@@ -371,8 +372,11 @@ impl Slot for ArmorSlot {
         1
     }
 
-    /// TODO: Check for curse of binding enchantment.
-    fn can_take_items(&self, _player: &dyn InventoryPlayer) -> bool {
-        true
+    fn can_take_items(&self, player: &dyn InventoryPlayer) -> bool {
+        player.is_creative()
+            || self
+                .get_cloned_stack()
+                .get_enchantment_level(&Enchantment::BINDING_CURSE)
+                == 0
     }
 }
