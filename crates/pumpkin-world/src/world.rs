@@ -40,7 +40,7 @@ bitflags! {
         /// Vanilla `Block.UPDATE_KNOWN_SHAPE`: skips the neighbour shape updates for this
         /// change. Used when a multi-block structure such as a nether portal is written in
         /// one go, so the blocks are not removed again while the structure is incomplete.
-        const UPDATE_KNOWN_SHAPE                   = 0b0010_0000_0000;
+        const UPDATE_KNOWN_SHAPE                    = 0b001_0000_0000;
     }
 }
 
