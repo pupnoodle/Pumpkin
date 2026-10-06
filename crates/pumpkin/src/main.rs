@@ -42,6 +42,12 @@ use tracing::{debug, info, warn};
 
 const CARGO_PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+// mimalloc scales much better than the system allocator across many threads and
+// returns freed memory to the OS aggressively, which matters on multi-socket
+// hosts where glibc arenas both contend on locks and retain RSS.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 static MAIN_THREAD: OnceLock<ThreadId> = OnceLock::new();
 
 // WARNING: All rayon calls from the tokio runtime must be non-blocking! This includes things

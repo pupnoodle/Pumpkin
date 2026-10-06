@@ -39,6 +39,103 @@ pub struct CParticle<'a> {
     pub data: &'a [u8],
 }
 
+/// The payload that follows the particle ID for particle types whose vanilla
+/// `ParticleOptions` is not a plain `SimpleParticleType`.
+///
+/// The particle ID is taken from [`Self::particle`] rather than passed
+/// alongside, so a payload can never be paired with the wrong particle.
+/// Particles that take no options are spawned through [`CParticle`] directly
+/// with an empty `data`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ParticleOptions {
+    /// `minecraft:trail`, vanilla's `TrailParticleOption`.
+    Trail {
+        /// The position the trail travels towards.
+        target: Vector3<f64>,
+        /// The trail color, encoded as `0xRRGGBB`. The top bits are ignored.
+        color: i32,
+        /// Life time in ticks.
+        duration: i32,
+    },
+    /// `minecraft:block_crumble`, vanilla's `BlockParticleOption`.
+    BlockCrumble {
+        /// The global block state palette ID of the crumbling block.
+        state: i32,
+    },
+    /// `minecraft:effect`, vanilla's `ColorParticleOption`.
+    Effect {
+        /// The particle color, encoded as `0xRRGGBB`. The top bits are ignored.
+        color: i32,
+        /// Particle potency/scale.
+        power: f32,
+    },
+}
+
+impl ParticleOptions {
+    /// The particle this payload belongs to.
+    #[must_use]
+    pub const fn particle(&self) -> pumpkin_data::particle::Particle {
+        match self {
+            Self::Trail { .. } => pumpkin_data::particle::Particle::Trail,
+            Self::BlockCrumble { .. } => pumpkin_data::particle::Particle::BlockCrumble,
+            Self::Effect { .. } => pumpkin_data::particle::Particle::Effect,
+        }
+    }
+
+    /// Whether `version` still has this particle under an ID of its own.
+    ///
+    /// On older versions the particle may be remapped onto an unrelated one
+    /// that reads a different payload — `trail` folds onto `entity_effect`,
+    /// for instance — so no byte string we could write would be read correctly
+    /// and the packet has to be dropped instead.
+    #[must_use]
+    pub fn is_supported_by(&self, version: JavaMinecraftVersion) -> bool {
+        match self {
+            // `trail` was added in 1.21.2 with the pale garden
+            Self::Trail { .. } => version >= JavaMinecraftVersion::V_1_21_2,
+            Self::BlockCrumble { .. } | Self::Effect { .. } => true,
+        }
+    }
+
+    /// Writes the payload that follows the particle ID.
+    pub fn write(&self, write: impl Write) -> Result<(), WritingError> {
+        let mut write = write;
+        match *self {
+            Self::Trail {
+                target,
+                color,
+                duration,
+            } => {
+                write.write_f64_be(target.x)?;
+                write.write_f64_be(target.y)?;
+                write.write_f64_be(target.z)?;
+                write.write_i32_be(color)?;
+                write.write_var_int(&VarInt(duration))
+            }
+            Self::BlockCrumble { state } => write.write_var_int(&VarInt(state)),
+            Self::Effect { color, power } => {
+                write.write_i32_be(color)?;
+                write.write_f32_be(power)
+            }
+        }
+    }
+
+    /// The payload to send to a client on `version`, or `None` when that client
+    /// cannot read this particle and the packet must be dropped instead.
+    ///
+    /// See [`Self::is_supported_by`] for when that happens. `None` also covers a
+    /// write failure, which a `Vec` sink cannot actually produce.
+    #[must_use]
+    pub fn encode_for(&self, version: JavaMinecraftVersion) -> Option<Vec<u8>> {
+        if !self.is_supported_by(version) {
+            return None;
+        }
+        let mut payload = Vec::new();
+        self.write(&mut payload).ok()?;
+        Some(payload)
+    }
+}
+
 impl<'a> CParticle<'a> {
     #[expect(clippy::too_many_arguments)]
     #[must_use]
@@ -370,5 +467,51 @@ mod tests {
         let mut cursor = Cursor::new(bytes);
         let id = VarInt::decode(&mut cursor).unwrap();
         assert_eq!(id, VarInt(Particle::ExplosionEmitter as i32));
+    }
+
+    #[test]
+    fn trail_options_encode_target_color_duration() {
+        use crate::ser::NetworkReadExt;
+
+        let options = super::ParticleOptions::Trail {
+            target: Vector3::new(1.5, 2.5, 3.5),
+            color: 0x00AB_CDEF,
+            duration: 40,
+        };
+        let mut bytes = Vec::new();
+        options.write(&mut bytes).unwrap();
+
+        let mut cursor = Cursor::new(bytes);
+        assert_eq!(cursor.get_f64_be().unwrap(), 1.5);
+        assert_eq!(cursor.get_f64_be().unwrap(), 2.5);
+        assert_eq!(cursor.get_f64_be().unwrap(), 3.5);
+        assert_eq!(cursor.get_i32_be().unwrap(), 0x00AB_CDEF);
+        assert_eq!(cursor.get_var_int().unwrap(), VarInt(40));
+        assert_eq!(cursor.position(), cursor.get_ref().len() as u64);
+    }
+
+    #[test]
+    fn block_crumble_options_encode_state_varint() {
+        use crate::ser::NetworkReadExt;
+
+        let options = super::ParticleOptions::BlockCrumble { state: 8593 };
+        let mut bytes = Vec::new();
+        options.write(&mut bytes).unwrap();
+
+        let mut cursor = Cursor::new(bytes);
+        assert_eq!(cursor.get_var_int().unwrap(), VarInt(8593));
+        assert_eq!(cursor.position(), cursor.get_ref().len() as u64);
+    }
+
+    #[test]
+    fn trail_options_dropped_for_versions_without_the_particle() {
+        let options = super::ParticleOptions::Trail {
+            target: Vector3::new(0.0, 0.0, 0.0),
+            color: 0,
+            duration: 10,
+        };
+        assert!(options.encode_for(JavaMinecraftVersion::V_1_21).is_none());
+        assert!(options.encode_for(JavaMinecraftVersion::V_1_21_2).is_some());
+        assert!(options.encode_for(JavaMinecraftVersion::V_26_3).is_some());
     }
 }

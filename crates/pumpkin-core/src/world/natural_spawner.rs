@@ -188,10 +188,12 @@ struct PointCharge(BlockPos, f64);
 
 impl PointCharge {
     fn get_potential_change(&self, pos: &BlockPos) -> f64 {
-        let dx = self.0.0.x - pos.0.x;
-        let dy = self.0.0.y - pos.0.y;
-        let dz = self.0.0.z - pos.0.z;
-        let dist_sq = (dx * dx + dy * dy + dz * dz) as f64;
+        // Vanilla widens each axis to double before squaring (Vec3i.distSqr),
+        // so far-apart charges can't overflow i32 arithmetic.
+        let dx = f64::from(self.0.0.x) - f64::from(pos.0.x);
+        let dy = f64::from(self.0.0.y) - f64::from(pos.0.y);
+        let dz = f64::from(self.0.0.z) - f64::from(pos.0.z);
+        let dist_sq = dx * dx + dy * dy + dz * dz;
         if dist_sq == 0.0 {
             f64::INFINITY
         } else {

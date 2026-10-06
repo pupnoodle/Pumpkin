@@ -1,0 +1,17 @@
+# Optional CPU tuning for dedicated hosts. The default build stays portable
+# (plain x86-64). Uncomment ONE rustflags line for the machine you deploy to.
+#
+# Old server CPUs (e.g. HP DL360p/DL380p Gen8, Xeon E5-2600 v1/v2) support
+# AVX1 but NOT AVX2/BMI2/FMA. Building with `x86-64-v3` or newer produces a
+# binary that crashes with SIGILL on those machines, so cap at v2 or use the
+# matching microarchitecture:
+#
+#   E5-2600 v2 (Ivy Bridge-EP):  "-C", "target-cpu=ivybridge"
+#   E5-2600 v1 (Sandy Bridge-EP): "-C", "target-cpu=sandybridge"
+#   Generic pre-AVX2 fallback:    "-C", "target-cpu=x86-64-v2"
+#
+# Building on the target server itself can just use:
+#   "-C", "target-cpu=native"
+#
+# [build]
+# rustflags = ["-C", "target-cpu=native"]

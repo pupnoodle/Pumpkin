@@ -13,7 +13,7 @@ impl MobEffect for SaturationMobEffect {
         if let Some(entity) = world.get_entity_by_id(living.entity.entity_id)
             && let Some(player) = entity.get_player()
         {
-            let hunger = amplifier + 1;
+            let hunger = amplifier.saturating_add(1);
             player.hunger_manager.add_hunger(hunger);
             player
                 .hunger_manager

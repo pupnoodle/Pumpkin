@@ -1,6 +1,5 @@
 use pumpkin_data::Block;
 use pumpkin_data::BlockState;
-use pumpkin_data::block_properties::BlockProperties;
 use pumpkin_data::damage::DamageType;
 use pumpkin_data::data_component_impl::EnchantmentsImpl;
 use pumpkin_data::entity::EntityType;

@@ -1,5 +1,3 @@
-use std::sync::atomic::Ordering;
-
 use super::{Controls, Goal};
 use crate::entity::mob::Mob;
 use pumpkin_data::entity::EntityPose;

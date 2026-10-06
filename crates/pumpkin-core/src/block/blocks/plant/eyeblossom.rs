@@ -4,9 +4,9 @@ use pumpkin_data::{
     Block, BlockId, BlockStateId,
     effect::StatusEffect,
     entity::EntityType,
-    particle::Particle,
     sound::{Sound, SoundCategory},
 };
+use pumpkin_protocol::java::client::play::ParticleOptions;
 use pumpkin_util::{
     Difficulty,
     math::{position::BlockPos, vector3::Vector3},
@@ -24,6 +24,10 @@ use crate::{
 
 const EYEBLOSSOM_XZ_RANGE: i32 = 3;
 const EYEBLOSSOM_Y_RANGE: i32 = 2;
+
+/// Trail particle colors from vanilla `EyeblossomBlock.Type.particleColor`.
+const OPEN_PARTICLE_COLOR: i32 = 16_545_810;
+const CLOSED_PARTICLE_COLOR: i32 = 6_250_335;
 
 pub struct EyeblossomBlock;
 
@@ -130,15 +134,8 @@ pub fn try_changing_state(world: &Arc<World>, current_block: &Block, pos: &Block
 
     world.set_block_state(pos, new_block.default_state.id, BlockFlags::NOTIFY_ALL);
 
-    world.spawn_particle(
-        pos.to_centered_f64(),
-        Vector3::new(0.0, 0.0, 0.0),
-        0.0,
-        1,
-        Particle::Trail,
-    );
-
     let mut rng = rand::rng();
+    spawn_transform_particle(world, new_block, pos, &mut rng);
     for dx in -EYEBLOSSOM_XZ_RANGE..=EYEBLOSSOM_XZ_RANGE {
         for dy in -EYEBLOSSOM_Y_RANGE..=EYEBLOSSOM_Y_RANGE {
             for dz in -EYEBLOSSOM_XZ_RANGE..=EYEBLOSSOM_XZ_RANGE {
@@ -169,4 +166,45 @@ pub fn try_changing_state(world: &Arc<World>, current_block: &Block, pos: &Block
     }
 
     true
+}
+
+/// Emits the `minecraft:trail` particle that marks a flower changing state,
+/// mirroring vanilla `EyeblossomBlock.Type.spawnTransformParticle`.
+fn spawn_transform_particle(
+    world: &Arc<World>,
+    new_block: &Block,
+    pos: &BlockPos,
+    rng: &mut impl RngExt,
+) {
+    world.spawn_particle_with_options(
+        pos.to_centered_f64(),
+        Vector3::new(0.0, 0.0, 0.0),
+        0.0,
+        1,
+        &transform_particle(new_block, pos, rng),
+    );
+}
+
+/// Builds that particle. Vanilla runs this on the type the flower turned *into*,
+/// so `new_block` is the new state and the color comes from it.
+fn transform_particle(new_block: &Block, pos: &BlockPos, rng: &mut impl RngExt) -> ParticleOptions {
+    let color = if new_block == &Block::OPEN_EYEBLOSSOM {
+        OPEN_PARTICLE_COLOR
+    } else {
+        CLOSED_PARTICLE_COLOR
+    };
+
+    let start = pos.to_centered_f64();
+    let lifetime = 0.5 + rng.random::<f64>();
+    let velocity = Vector3::new(
+        rng.random::<f64>() - 0.5,
+        rng.random::<f64>() + 1.0,
+        rng.random::<f64>() - 0.5,
+    );
+
+    ParticleOptions::Trail {
+        target: start.add(&velocity.multiply(lifetime, lifetime, lifetime)),
+        color,
+        duration: (20.0 * lifetime) as i32,
+    }
 }

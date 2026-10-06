@@ -108,7 +108,7 @@ impl<S: crate::source::CommandSource> ArgumentType<S> for BlockArgumentType {
                 .unwrap_or_default();
             for (key, value) in &properties {
                 if let Some(entry) = merged.iter_mut().find(|(name, _)| name == key) {
-                    entry.1 = value.clone();
+                    entry.1.clone_from(value);
                 } else {
                     return Err(INVALID_BLOCK_ERROR_TYPE.create(
                         reader,

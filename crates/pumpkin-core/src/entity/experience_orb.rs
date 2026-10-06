@@ -334,7 +334,7 @@ mod tests {
     fn pickup_delay_blocks_absorb_until_it_expires() {
         assert!(!can_absorb(PICKUP_COOLDOWN));
         let mut delay = PICKUP_COOLDOWN;
-        let mut ticks = 0_u32;
+        let mut ticks = 0u32;
         while !can_absorb(delay) {
             delay = next_pickup_delay(delay);
             ticks += 1;

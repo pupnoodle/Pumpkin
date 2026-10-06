@@ -12,6 +12,7 @@ use pumpkin_data::sound::{Sound, SoundCategory};
 use pumpkin_data::tag::{self, Taggable};
 use pumpkin_nbt::compound::NbtCompound;
 use pumpkin_protocol::codec::var_int::VarInt;
+use pumpkin_protocol::java::client::play::ParticleOptions;
 use pumpkin_util::Hand;
 use pumpkin_util::math::vector3::Vector3;
 use uuid::Uuid;
@@ -258,12 +259,15 @@ impl Mob for MooshroomEntity {
             let pos = entity.pos.load();
             self.stew_effect.store(Some(1));
             world.play_sound(Sound::EntityMooshroomEat, SoundCategory::Neutral, &pos);
-            world.spawn_particle(
+            world.spawn_particle_with_options(
                 pos + Vector3::new(0.0, 0.5, 0.0),
                 Vector3::new(0.5, 0.5, 0.5),
                 0.0,
                 4,
-                Particle::Effect,
+                &ParticleOptions::Effect {
+                    color: 0x00FF_FFFF,
+                    power: 1.0,
+                },
             );
             return true;
         }
